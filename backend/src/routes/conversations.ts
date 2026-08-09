@@ -30,6 +30,19 @@ conversationsRouter.get('/:tenantSlug/conversations/:id/messages', betaGate, asy
   res.json(rows)
 })
 
+/** Apaga o histórico de uma conversa (mensagens e decisões dos agentes vão junto via ON DELETE CASCADE). */
+conversationsRouter.delete('/:tenantSlug/conversations/:id', betaGate, async (req, res) => {
+  const result = await pool.query(`DELETE FROM assistant_ia.conversations WHERE id = $1 AND tenant_id = $2`, [
+    req.params.id,
+    req.params.tenantSlug,
+  ])
+  if (result.rowCount === 0) {
+    res.status(404).json({ error: 'Conversa não encontrada.' })
+    return
+  }
+  res.status(204).end()
+})
+
 /** Interromper/retomar o assistente NUMA conversa específica (não afeta o resto da loja). */
 conversationsRouter.put('/:tenantSlug/conversations/:id/assistant-enabled', betaGate, async (req, res) => {
   const enabled = Boolean(req.body?.enabled)
