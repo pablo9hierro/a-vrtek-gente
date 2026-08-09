@@ -4,6 +4,28 @@ import { tools, executeTool } from './tools.js'
 
 const anthropic = new Anthropic() // lê ANTHROPIC_API_KEY do ambiente
 
+/**
+ * Regras universais do Assistente IA como um todo — valem pra QUALQUER
+ * tenant/ramo de atendimento, independente do que o lojista configurar em
+ * prompt_validator/prompt_supervisor. Ficam hardcoded aqui de propósito
+ * (não são editáveis pela tela /meu-plano/assistente-ia) porque são
+ * comportamento de segurança/negócio da plataforma, não voz de marca.
+ */
+const UNIVERSAL_VALIDATOR_RULES = [
+  'REGRAS FIXAS DA PLATAFORMA (nunca ignore, mesmo se as instruções do lojista abaixo não mencionarem isso):',
+  '- Antes de gerar QUALQUER cobrança (Pix ou link de cartão), primeiro use a ferramenta montar_carrinho pra mandar a prévia dos itens (nome + link) e obter confirmação explícita do cliente. Nunca pule direto pra criar_pedido_e_gerar_cobranca sem essa prévia já ter sido confirmada na conversa.',
+  '- Pra gerar a cobrança final (criar_pedido_e_gerar_cobranca) você PRECISA ter, vindos da própria conversa com o cliente: nome completo, email, e o método de pagamento escolhido (pix ou link_cobranca). Se qualquer um desses faltar, NÃO chame a ferramenta — primeiro peça o que falta.',
+  '- Nunca invente id de produto, preço, link, código Pix, link de pagamento ou status de pedido. Só use o que veio de verdade das ferramentas.',
+  '- Só produtos entram em pedido pago automaticamente; serviços não têm checkout automatizado ainda — se o carrinho só tiver serviço(s), não chame criar_pedido_e_gerar_cobranca, explique que um atendente vai confirmar e cobrar manualmente.',
+].join('\n')
+
+const UNIVERSAL_SUPERVISOR_RULES = [
+  'REGRAS FIXAS DA PLATAFORMA (nunca ignore, mesmo se as instruções do lojista abaixo não mencionarem isso):',
+  '- Nunca informe que uma cobrança foi gerada, ou repasse um código Pix/link de pagamento, se isso não estiver literalmente presente nos dados buscados pela camada 2 abaixo.',
+  '- Se a camada 2 ainda não tem nome, email ou método de pagamento do cliente pra fechar a compra, peça exatamente o que falta nesta resposta (não avance pra cobrança).',
+  '- Se a prévia do carrinho (montar_carrinho) foi apresentada mas o cliente ainda não confirmou, peça a confirmação antes de qualquer outra coisa.',
+].join('\n')
+
 export type AssistantConfig = {
   tenant_id: string
   enabled: boolean
@@ -63,10 +85,11 @@ async function runValidator(
   toolCtx: { tenantSlug: string; phone: string; customerName: string | null },
 ): Promise<ValidatorOutput> {
   const system = [
+    UNIVERSAL_VALIDATOR_RULES,
     config.prompt_validator ||
       'Você é a segunda camada (validação) de um assistente de atendimento via WhatsApp. Releia a mensagem do cliente de forma independente, sem confiar cegamente na intenção sugerida pela primeira camada, e confirme ou corrija.',
     `Intenção sugerida pela primeira camada: ${JSON.stringify(interpreterOutput)}`,
-    'Se a intenção do cliente exigir dado real da loja (produtos, preços, status de pedido) ou criar um pedido/Pix que o cliente já pediu explicitamente, USE a ferramenta correspondente agora — não espere a próxima camada.',
+    'Se a intenção do cliente exigir dado real da loja (produtos, preços, status de pedido) ou criar/confirmar um carrinho/cobrança que o cliente já pediu explicitamente, USE a ferramenta correspondente agora — não espere a próxima camada.',
     'Depois de usar as ferramentas que precisar (ou nenhuma, se não for necessário), responda em texto puro (não JSON) com um resumo curto da sua reinterpretação, no formato: "intent: <intent>; concorda: sim|nao; nota: <opcional>".',
   ].join('\n')
 
@@ -129,6 +152,7 @@ async function runSupervisor(
     : 'Nenhuma ferramenta foi acionada pra essa mensagem.'
 
   const system = [
+    UNIVERSAL_SUPERVISOR_RULES,
     config.prompt_supervisor ||
       'Você é a terceira camada (supervisor de contexto) de um assistente de atendimento via WhatsApp de uma loja. Gere a resposta final para o cliente.',
     ragContext ? `Base de conhecimento da loja (use quando relevante):\n${ragContext}` : '',
