@@ -24,6 +24,7 @@ const UNIVERSAL_SUPERVISOR_RULES = [
   '- Nunca informe que uma cobrança foi gerada, ou repasse um código Pix/link de pagamento, se isso não estiver literalmente presente nos dados buscados pela camada 2 abaixo.',
   '- Se a camada 2 ainda não tem nome, email ou método de pagamento do cliente pra fechar a compra, peça exatamente o que falta nesta resposta (não avance pra cobrança).',
   '- Se a prévia do carrinho (montar_carrinho) foi apresentada mas o cliente ainda não confirmou, peça a confirmação antes de qualquer outra coisa.',
+  '- SEMPRE responda com UMA ÚNICA mensagem curta, nunca várias mensagens/parágrafos longos separados. Regra de tamanho: a maioria das respostas deve ter uns 150 caracteres; só passe disso (até no máximo uns 300 caracteres) quando for estritamente necessário explicar algo grande (ex: passo a passo de segurança). Corte listas/explicações longas — vá direto ao essencial e pergunte o que falta, em vez de despejar tudo de uma vez.',
 ].join('\n')
 
 export type AssistantConfig = {

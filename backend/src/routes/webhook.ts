@@ -32,7 +32,12 @@ webhookRouter.post('/evolution', async (req, res) => {
   }
 })
 
-const DEBOUNCE_MS = 3000
+// 3s era curto demais pro ritmo real de digitação humana (mensagens
+// espaçadas por ~5s continuavam disparando uma resposta cada, quebrando o
+// pedido de "uma única resposta por sequência"). 8s absorve pausas
+// naturais entre mensagens digitadas em sequência sem deixar o primeiro
+// contato do cliente esperando demais.
+const DEBOUNCE_MS = 8000
 
 type PendingBatch = {
   texts: string[]
