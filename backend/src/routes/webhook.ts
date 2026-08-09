@@ -68,7 +68,19 @@ async function handleInbound(payload: ForwardedEvolutionPayload) {
   const config = configRes.rows[0]
   if (!config || !config.enabled) return // assistente desligado nessa loja
 
-  const conversation = await findOrOpenConversation(tenantSlug, phone, customerName, config.window_timeout_minutes)
+  const conversation = await findOrOpenConversation(
+    tenantSlug,
+    phone,
+    customerName,
+    config.window_timeout_minutes,
+    text,
+    config.start_keywords,
+  )
+  // Sem conversa aberta e a mensagem não bateu nenhum gatilho de início ->
+  // ignora por completo (nunca cria conversa, nunca responde). O
+  // assistente só atende quem de fato iniciou o atendimento com uma das
+  // palavras configuradas em start_keywords.
+  if (!conversation) return
 
   await pool.query(
     `INSERT INTO assistant_ia.messages (conversation_id, tenant_id, direction, sender_type, content)
@@ -175,6 +187,8 @@ async function findOrOpenConversation(
   phone: string,
   customerName: string | null,
   windowTimeoutMinutes: number,
+  text: string,
+  startKeywords: string[],
 ) {
   const existing = await pool.query<{
     id: string
@@ -188,6 +202,12 @@ async function findOrOpenConversation(
     [tenantSlug, phone, windowTimeoutMinutes],
   )
   if (existing.rows.length > 0) return existing.rows[0]
+
+  // Sem janela aberta -> só inicia atendimento se essa mensagem bater um
+  // dos gatilhos de início configurados. Qualquer outra mensagem "do
+  // nada" (sem conversa em curso) é ignorada por completo.
+  const iniciou = (startKeywords ?? []).some((kw) => text.toLowerCase().includes(kw.toLowerCase()))
+  if (!iniciou) return null
 
   // Fecha qualquer janela velha que passou do timeout, antes de abrir uma nova.
   await pool.query(
