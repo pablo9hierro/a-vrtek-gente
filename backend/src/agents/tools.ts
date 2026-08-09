@@ -31,6 +31,38 @@ export const tools: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'buscar_servicos',
+    description:
+      'Busca serviços reais oferecidos pela loja (reparo, troca, manutenção etc.) — nome, descrição, categoria e preço. Use sempre que o cliente perguntar sobre serviços, conserto, reparo, troca de peça, ou pedir orçamento de manutenção.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        termo: {
+          type: 'string',
+          description: 'Palavra-chave pra filtrar (nome do serviço, aparelho ou marca). Deixe vazio pra listar tudo.',
+        },
+      },
+    },
+  },
+  {
+    name: 'consultar_horario_funcionamento',
+    description:
+      'Consulta o horário de funcionamento real da loja (dias e horas de abertura/fechamento) e se ela está atualmente aberta ou fechada manualmente. Use sempre que o cliente perguntar se a loja está aberta, até que horas funciona, ou horário de algum dia específico.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
+    name: 'consultar_localizacao_loja',
+    description:
+      'Consulta o endereço/localização real da loja. Use sempre que o cliente perguntar onde a loja fica, o endereço, ou pedir a localização pra ir buscar/entregar algo.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
+  {
     name: 'consultar_pedido',
     description:
       'Consulta os pedidos recentes do cliente (pelo telefone da própria conversa) na loja de verdade. Use sempre que o cliente perguntar sobre status/andamento de um pedido já feito.',
@@ -69,6 +101,9 @@ type ToolCtx = { tenantSlug: string; phone: string; customerName: string | null 
 export async function executeTool(name: string, input: Record<string, unknown>, ctx: ToolCtx): Promise<string> {
   try {
     if (name === 'buscar_produtos') return await buscarProdutos(ctx.tenantSlug, String(input.termo ?? ''))
+    if (name === 'buscar_servicos') return await buscarServicos(ctx.tenantSlug, String(input.termo ?? ''))
+    if (name === 'consultar_horario_funcionamento') return await consultarHorario(ctx.tenantSlug)
+    if (name === 'consultar_localizacao_loja') return await consultarLocalizacao(ctx.tenantSlug)
     if (name === 'consultar_pedido') return await consultarPedido(ctx.tenantSlug, ctx.phone)
     if (name === 'criar_pedido_e_gerar_pix') {
       const itens = Array.isArray(input.itens) ? (input.itens as { produto_id: string; quantidade: number }[]) : []
@@ -90,6 +125,49 @@ async function buscarProdutos(tenantSlug: string, termo: string): Promise<string
     .slice(0, 20)
     .map((p) => `- id=${p.id} | ${p.name}: R$ ${p.price.toFixed(2).replace('.', ',')}${p.description ? ` — ${p.description}` : ''}`)
     .join('\n')
+}
+
+async function buscarServicos(tenantSlug: string, termo: string): Promise<string> {
+  const res = await fetch(`${ECOMMERCE_API_URL}/api/public/catalog/${tenantSlug}/services`)
+  if (!res.ok) return 'Não foi possível consultar os serviços agora.'
+  const services = (await res.json()) as { id: string; name: string; description: string; category_name?: string; price: number }[]
+  const filtered = termo
+    ? services.filter((s) => s.name.toLowerCase().includes(termo.toLowerCase()) || (s.category_name ?? '').toLowerCase().includes(termo.toLowerCase()))
+    : services
+  if (filtered.length === 0) return termo ? `Nenhum serviço encontrado pra "${termo}".` : 'A loja não tem serviços cadastrados ainda.'
+  return filtered
+    .slice(0, 20)
+    .map((s) => `- ${s.name}${s.category_name ? ` (${s.category_name})` : ''}: R$ ${s.price.toFixed(2).replace('.', ',')}${s.description ? ` — ${s.description}` : ''}`)
+    .join('\n')
+}
+
+const WEEKDAY_NAMES = ['Domingo', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta', 'Sábado']
+
+async function consultarHorario(tenantSlug: string): Promise<string> {
+  const res = await fetch(`${ECOMMERCE_API_URL}/api/public/catalog/${tenantSlug}/store-status`)
+  if (!res.ok) return 'Não foi possível consultar o horário de funcionamento agora.'
+  const status = (await res.json()) as {
+    hours: { day_of_week: number; is_open: boolean; intervals: { opens_at: string; closes_at: string }[] }[]
+    manually_closed: boolean
+    manual_closed_reason?: string | null
+  }
+  const lines = status.hours.map((h) => {
+    const dayName = WEEKDAY_NAMES[h.day_of_week] ?? `dia ${h.day_of_week}`
+    if (!h.is_open || h.intervals.length === 0) return `${dayName}: fechado`
+    return `${dayName}: ${h.intervals.map((i) => `${i.opens_at}–${i.closes_at}`).join(', ')}`
+  })
+  const closedNote = status.manually_closed
+    ? `\nAVISO: a loja está fechada manualmente agora${status.manual_closed_reason ? ` (${status.manual_closed_reason})` : ''}, independente do horário normal.`
+    : ''
+  return lines.join('\n') + closedNote
+}
+
+async function consultarLocalizacao(tenantSlug: string): Promise<string> {
+  const res = await fetch(`${ECOMMERCE_API_URL}/api/public/catalog/${tenantSlug}/store-status`)
+  if (!res.ok) return 'Não foi possível consultar a localização da loja agora.'
+  const status = (await res.json()) as { pickup_address?: string }
+  if (!status.pickup_address) return 'A loja ainda não cadastrou o endereço de retirada.'
+  return `Endereço da loja: ${status.pickup_address}`
 }
 
 async function consultarPedido(tenantSlug: string, phone: string): Promise<string> {
