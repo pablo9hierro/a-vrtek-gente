@@ -12,12 +12,18 @@ export async function sendWhatsappMessage(instance: string, phone: string, text:
     console.log(`[evolution não configurado] pra ${phone} via ${instance}: ${text}`)
     return
   }
-  const res = await fetch(`${url.replace(/\/$/, '')}/message/sendText/${instance}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', apikey: apiKey },
-    body: JSON.stringify({ number: phone, text }),
-  })
-  if (!res.ok) {
-    console.warn(`evolution api retornou ${res.status} pra ${phone}: ${await res.text()}`)
+  try {
+    const res = await fetch(`${url.replace(/\/$/, '')}/message/sendText/${instance}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: apiKey },
+      body: JSON.stringify({ number: phone, text }),
+    })
+    if (!res.ok) {
+      console.warn(`evolution api retornou ${res.status} pra ${phone} via ${instance}: ${await res.text()}`)
+      return
+    }
+    console.log(`evolution api enviou com sucesso pra ${phone} via ${instance}`)
+  } catch (e) {
+    console.error(`falha ao chamar evolution api pra ${phone} via ${instance}:`, e)
   }
 }
