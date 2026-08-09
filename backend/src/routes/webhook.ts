@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { pool } from '../db/pool.js'
 import { isBetaTenant } from '../services/beta.js'
-import { runPipeline, type AssistantConfig } from '../agents/pipeline.js'
+import { runPipeline, MSG_SPLIT_MARKER, type AssistantConfig } from '../agents/pipeline.js'
 import { sendWhatsappMessage } from '../evolution-adapter/send.js'
 
 export const webhookRouter = Router()
@@ -164,10 +164,18 @@ async function processBatch(conversationId: string, config: AssistantConfig) {
 
     const result = await runPipeline(config, historyRes.rows, joinedText, batch.phone, batch.customerName, batch.instance)
 
+    // Código Pix/link de pagamento vem separado do aviso por um marcador
+    // (ver MSG_SPLIT_MARKER) — cada lado vira uma mensagem própria no
+    // WhatsApp, pro cliente conseguir copiar/tocar o código sozinho, sem
+    // texto grudado. O histórico salva o texto completo (com quebra de
+    // linha no lugar do marcador), só o ENVIO real que sai em duas partes.
+    const replyParts = result.reply.split(MSG_SPLIT_MARKER).map((p) => p.trim()).filter(Boolean)
+    const storedContent = replyParts.join('\n\n')
+
     const outboundMessage = await pool.query<{ id: string }>(
       `INSERT INTO assistant_ia.messages (conversation_id, tenant_id, direction, sender_type, content)
        VALUES ($1, $2, 'outbound', 'assistente', $3) RETURNING id`,
-      [conversationId, batch.tenantSlug, result.reply],
+      [conversationId, batch.tenantSlug, storedContent],
     )
     await pool.query(
       `INSERT INTO assistant_ia.agent_decisions (message_id, tenant_id, layer, output) VALUES
@@ -176,7 +184,9 @@ async function processBatch(conversationId: string, config: AssistantConfig) {
     )
     await pool.query(`UPDATE assistant_ia.conversations SET last_message_at = now() WHERE id = $1`, [conversationId])
 
-    await sendWhatsappMessage(batch.instance, batch.phone, result.reply)
+    for (const part of replyParts) {
+      await sendWhatsappMessage(batch.instance, batch.phone, part)
+    }
   } catch (e) {
     console.error('erro processando lote de mensagens debounced:', e)
   }

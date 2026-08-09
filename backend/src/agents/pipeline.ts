@@ -2,6 +2,14 @@ import { pool } from '../db/pool.js'
 import { completeSimple, completeWithTools, type ToolCallRecord } from './aiClient.js'
 
 /**
+ * Marcador que a IA usa pra separar o aviso do código Pix/link de
+ * pagamento — cada lado vira uma mensagem própria no WhatsApp, pra o
+ * cliente conseguir copiar o código sozinho, sem texto grudado.
+ * `webhook.ts` faz o split literal nesse texto ao enviar.
+ */
+export const MSG_SPLIT_MARKER = '|||MSG_SPLIT|||'
+
+/**
  * Regras universais do Assistente IA como um todo — valem pra QUALQUER
  * tenant/ramo de atendimento, independente do que o lojista configurar em
  * prompt_validator. Ficam hardcoded aqui de propósito (não são editáveis
@@ -28,6 +36,7 @@ function universalValidatorRules(config: AssistantConfig): string {
     '- Nunca informe que uma cobrança foi gerada, ou repasse um código Pix/link de pagamento, se isso não estiver literalmente presente no resultado de uma ferramenta chamada nesta mesma interação.',
     '- Seja DIRETO — sem rodeios, sem repetir a mesma pergunta de formas diferentes. Assim que entender o que o cliente quer (produto, serviço, orçamento, horário, status de pedido), vá direto ao ponto. Assim que o cliente confirmar interesse real em comprar um produto/serviço, já avance pra montar o carrinho e perguntar nome/email/método de pagamento — não fique enrolando ou pedindo confirmação repetida.',
     `- SEMPRE responda com UMA ÚNICA mensagem curta, nunca várias mensagens/parágrafos longos separados. Regra de tamanho: a maioria das respostas deve ter uns ${min} caracteres; só passe disso (até no máximo uns ${max} caracteres) quando for estritamente necessário explicar algo grande (ex: passo a passo de segurança). Corte listas/explicações longas — vá direto ao essencial e pergunte o que falta, em vez de despejar tudo de uma vez.`,
+    `- EXCEÇÃO à regra acima: quando (e só quando) a ferramenta criar_pedido_e_gerar_cobranca retornar um código Pix copia-e-cola ou um link de pagamento, sua resposta deve ter DUAS partes separadas pelo marcador ${MSG_SPLIT_MARKER} (cada parte vira uma mensagem separada no WhatsApp, nessa ordem): a primeira parte é só o aviso curto (ex: "Copie o código Pix abaixo e cole no app do seu banco:" ou "Clique no link abaixo pra pagar:"), a segunda parte é SÓ o código/link, sozinho, sem nenhum texto a mais grudado (nem antes nem depois) — o cliente precisa conseguir copiar/tocar direto. Formato exato: "<aviso>${MSG_SPLIT_MARKER}<código ou link>". Fora desse caso específico, nunca use esse marcador.`,
   ].join('\n')
 }
 
