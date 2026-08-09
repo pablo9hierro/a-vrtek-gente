@@ -74,7 +74,7 @@ async function handleInbound(payload: ForwardedEvolutionPayload) {
     [conversation.id],
   )
 
-  const result = await runPipeline(config, historyRes.rows, text)
+  const result = await runPipeline(config, historyRes.rows, text, phone)
 
   const outboundMessage = await pool.query<{ id: string }>(
     `INSERT INTO assistant_ia.messages (conversation_id, tenant_id, direction, sender_type, content)

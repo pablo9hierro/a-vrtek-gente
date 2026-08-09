@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { pool } from '../db/pool.js'
+import { tools, executeTool } from './tools.js'
 
 const anthropic = new Anthropic() // lê ANTHROPIC_API_KEY do ambiente
 
@@ -71,7 +72,12 @@ async function runValidator(
   return safeParseJson<ValidatorOutput>(text, { intent: interpreterOutput.intent, agrees: true })
 }
 
-/** IA 3 — supervisor de contexto: lê o histórico do chat inteiro + RAG e gera a resposta final. */
+/**
+ * IA 3 — supervisor de contexto: lê o histórico do chat inteiro + RAG e
+ * gera a resposta final. Tem acesso de verdade a dados da loja via tool
+ * use (catálogo real, pedidos reais do cliente) — nunca inventa produto
+ * ou status de pedido, consulta antes de responder.
+ */
 async function runSupervisor(
   config: AssistantConfig,
   history: { sender_type: string; content: string }[],
@@ -79,13 +85,15 @@ async function runSupervisor(
   interpreterOutput: InterpreterOutput,
   validatorOutput: ValidatorOutput,
   ragContext: string,
+  toolCtx: { tenantSlug: string; phone: string },
 ): Promise<string> {
   const system = [
     config.prompt_supervisor ||
       'Você é o supervisor de contexto de um assistente de atendimento via WhatsApp de uma loja. Gere a resposta final para o cliente, considerando todo o histórico da conversa e a base de conhecimento da loja.',
     ragContext ? `Base de conhecimento da loja (use quando relevante):\n${ragContext}` : '',
     `Intenção identificada: ${validatorOutput.intent}${validatorOutput.agrees ? '' : ` (revisor discordou: ${validatorOutput.note ?? ''})`}`,
-    'Responda em texto puro, direto, no tom de uma loja atendendo cliente pelo WhatsApp. Não invente informação que não está no contexto — se não souber, diga que vai verificar e chamar um atendente humano.',
+    'Você TEM ferramentas de verdade pra consultar o catálogo de produtos e os pedidos do cliente — SEMPRE use a ferramenta certa antes de responder perguntas sobre produtos/preços/pedidos, nunca invente ou diga que "o sistema não está respondendo" sem antes tentar a ferramenta.',
+    'Responda em texto puro, direto, no tom de uma loja atendendo cliente pelo WhatsApp. Só diga que vai chamar um atendente humano se a ferramenta realmente falhar ou não existir ferramenta pra aquilo (ex: fechar pedido/pagamento ainda não é automático).',
   ]
     .filter(Boolean)
     .join('\n\n')
@@ -96,13 +104,32 @@ async function runSupervisor(
   }))
   conversationMessages.push({ role: 'user', content: userMessage })
 
-  const res = await anthropic.messages.create({
-    model: 'claude-opus-5',
-    max_tokens: 1024,
-    system,
-    messages: conversationMessages,
-  })
-  return res.content.find((b) => b.type === 'text')?.text ?? 'Desculpa, não consegui gerar uma resposta agora — já chamo alguém pra te ajudar.'
+  // Loop de tool use — até 4 idas e voltas (evita loop infinito se o
+  // modelo insistir em chamar ferramenta sem parar).
+  for (let i = 0; i < 4; i++) {
+    const res = await anthropic.messages.create({
+      model: 'claude-opus-5',
+      max_tokens: 1024,
+      system,
+      tools,
+      messages: conversationMessages,
+    })
+
+    if (res.stop_reason !== 'tool_use') {
+      return res.content.find((b) => b.type === 'text')?.text ?? 'Desculpa, não consegui gerar uma resposta agora — já chamo alguém pra te ajudar.'
+    }
+
+    conversationMessages.push({ role: 'assistant', content: res.content })
+    const toolResults: Anthropic.ToolResultBlockParam[] = []
+    for (const block of res.content) {
+      if (block.type !== 'tool_use') continue
+      const output = await executeTool(block.name, block.input as Record<string, unknown>, toolCtx)
+      toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: output })
+    }
+    conversationMessages.push({ role: 'user', content: toolResults })
+  }
+
+  return 'Desculpa, tive um problema pra consultar os dados agora — já chamo alguém pra te ajudar.'
 }
 
 function safeParseJson<T>(text: string, fallback: T): T {
@@ -141,10 +168,14 @@ export async function runPipeline(
   config: AssistantConfig,
   history: { sender_type: string; content: string }[],
   userMessage: string,
+  phone: string,
 ): Promise<PipelineResult> {
   const interpreterOutput = await runInterpreter(config, userMessage)
   const validatorOutput = await runValidator(config, userMessage, interpreterOutput)
   const ragContext = await searchRag(config.tenant_id, userMessage)
-  const reply = await runSupervisor(config, history, userMessage, interpreterOutput, validatorOutput, ragContext)
+  const reply = await runSupervisor(config, history, userMessage, interpreterOutput, validatorOutput, ragContext, {
+    tenantSlug: config.tenant_id,
+    phone,
+  })
   return { reply, interpreterOutput, validatorOutput }
 }
