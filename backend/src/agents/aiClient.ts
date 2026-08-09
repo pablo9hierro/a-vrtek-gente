@@ -51,7 +51,11 @@ export async function completeSimple(config: AssistantConfig, system: string, us
 
 function anthropicClient(config: AssistantConfig): Anthropic {
   const key = config.anthropic_api_key?.trim()
-  return key ? new Anthropic({ apiKey: key }) : defaultAnthropic
+  // O mesmo campo guarda a chave de qualquer provedor escolhido — se o
+  // lojista trocou de OpenRouter pra Anthropic sem limpar o campo, a
+  // chave antiga não tem o formato certo (sk-ant-...) e quebraria com
+  // 401; nesse caso ignora e cai no fallback global, em vez de falhar.
+  return key && key.startsWith('sk-ant-') ? new Anthropic({ apiKey: key }) : defaultAnthropic
 }
 
 async function completeWithToolsAnthropic(
