@@ -32,12 +32,10 @@ webhookRouter.post('/evolution', async (req, res) => {
   }
 })
 
-// 3s era curto demais pro ritmo real de digitação humana (mensagens
-// espaçadas por ~5s continuavam disparando uma resposta cada, quebrando o
-// pedido de "uma única resposta por sequência"). 8s absorve pausas
-// naturais entre mensagens digitadas em sequência sem deixar o primeiro
-// contato do cliente esperando demais.
-const DEBOUNCE_MS = 8000
+// Padrão (se o lojista não configurar `message_batch_window_seconds` em
+// /meu-plano/assistente-ia) — 3s era curto demais pro ritmo real de
+// digitação humana, então o default subiu pra 8s.
+const DEFAULT_DEBOUNCE_MS = 8000
 
 type PendingBatch = {
   texts: string[]
@@ -114,11 +112,14 @@ function scheduleDebouncedReply(
     config: AssistantConfig
   },
 ) {
+  const debounceMs = args.config.message_batch_window_seconds
+    ? args.config.message_batch_window_seconds * 1000
+    : DEFAULT_DEBOUNCE_MS
   const existing = pendingBatches.get(conversationId)
   if (existing) {
     clearTimeout(existing.timer)
     existing.texts.push(args.text)
-    existing.timer = setTimeout(() => void processBatch(conversationId, args.config), DEBOUNCE_MS)
+    existing.timer = setTimeout(() => void processBatch(conversationId, args.config), debounceMs)
     return
   }
   const batch: PendingBatch = {
@@ -128,7 +129,7 @@ function scheduleDebouncedReply(
     phone: args.phone,
     customerName: args.customerName,
     conversationId,
-    timer: setTimeout(() => void processBatch(conversationId, args.config), DEBOUNCE_MS),
+    timer: setTimeout(() => void processBatch(conversationId, args.config), debounceMs),
   }
   pendingBatches.set(conversationId, batch)
 }
@@ -159,7 +160,7 @@ async function processBatch(conversationId: string, config: AssistantConfig) {
     await pool.query(
       `INSERT INTO assistant_ia.agent_decisions (message_id, tenant_id, layer, output) VALUES
          ($1, $2, 'interpreter', $3), ($1, $2, 'validator', $4)`,
-      [outboundMessage.rows[0].id, batch.tenantSlug, result.interpreterOutput, result.validatorOutput],
+      [outboundMessage.rows[0].id, batch.tenantSlug, result.interpreterOutput, { tool_calls: result.toolCalls }],
     )
     await pool.query(`UPDATE assistant_ia.conversations SET last_message_at = now() WHERE id = $1`, [conversationId])
 

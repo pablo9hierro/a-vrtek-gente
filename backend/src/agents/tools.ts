@@ -100,20 +100,21 @@ export const tools: Anthropic.Tool[] = [
   {
     name: 'criar_pedido_e_gerar_cobranca',
     description:
-      'Cria de verdade um pedido com os PRODUTOS que o cliente confirmou (depois de já ter visto e aceitado a prévia do carrinho via montar_carrinho) e gera a cobrança no método escolhido pelo cliente (pix ou link de cobrança/cartão). Use SÓ depois que o cliente: (1) confirmou os itens na prévia do carrinho, (2) informou nome e email, (3) escolheu o método de pagamento. Nunca invente nome, email ou método — pergunte se faltar. Só produtos entram no pedido de verdade (serviços ainda não têm checkout automatizado — se o cliente só quiser serviço, avise que um atendente vai confirmar e cobrar manualmente). Pedido sempre nasce como retirada no local (esse atendimento por WhatsApp ainda não coleta endereço/entrega) e pendente de pagamento — nunca já pago.',
+      'Cria de verdade um pedido com os produtos e/ou serviços que o cliente confirmou (depois de já ter visto e aceitado a prévia do carrinho via montar_carrinho) e gera a cobrança no método escolhido pelo cliente (pix ou link de cobrança/cartão). Use SÓ depois que o cliente: (1) confirmou os itens na prévia do carrinho, (2) informou nome e email, (3) escolheu o método de pagamento. Nunca invente nome, email ou método — pergunte se faltar. Se o serviço depender de peça em estoque e não tiver disponibilidade suficiente, a chamada falha — nesse caso avise que não tem peça disponível agora. Pedido sempre nasce como retirada no local (esse atendimento por WhatsApp ainda não coleta endereço/entrega) e pendente de pagamento — nunca já pago.',
     input_schema: {
       type: 'object',
       properties: {
         itens: {
           type: 'array',
-          description: 'Lista de PRODUTOS do carrinho (id vindo de buscar_produtos) e quantidade.',
+          description: 'Lista de itens do carrinho — cada um com produto_id OU servico_id (nunca os dois) e quantidade.',
           items: {
             type: 'object',
             properties: {
-              produto_id: { type: 'string' },
+              produto_id: { type: 'string', description: 'id do produto, vindo de buscar_produtos.' },
+              servico_id: { type: 'string', description: 'id do serviço, vindo de buscar_servicos.' },
               quantidade: { type: 'integer', minimum: 1 },
             },
-            required: ['produto_id', 'quantidade'],
+            required: ['quantidade'],
           },
         },
         nome_cliente: { type: 'string', description: 'Nome completo informado pelo cliente pra finalizar o pedido.' },
@@ -145,7 +146,9 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
       return montarCarrinho(ctx.tenantSlug, itens)
     }
     if (name === 'criar_pedido_e_gerar_cobranca') {
-      const itens = Array.isArray(input.itens) ? (input.itens as { produto_id: string; quantidade: number }[]) : []
+      const itens = Array.isArray(input.itens)
+        ? (input.itens as { produto_id?: string; servico_id?: string; quantidade: number }[])
+        : []
       return await criarPedidoEGerarCobranca(ctx, itens, {
         nomeCliente: String(input.nome_cliente ?? ''),
         emailCliente: String(input.email_cliente ?? ''),
@@ -267,10 +270,11 @@ function montarCarrinho(
 
 async function criarPedidoEGerarCobranca(
   ctx: ToolCtx,
-  itens: { produto_id: string; quantidade: number }[],
+  itens: { produto_id?: string; servico_id?: string; quantidade: number }[],
   opts: { nomeCliente: string; emailCliente: string; metodoPagamento: 'pix' | 'link_cobranca' },
 ): Promise<string> {
-  if (itens.length === 0) return 'Preciso de pelo menos um produto pra criar o pedido.'
+  if (itens.length === 0) return 'Preciso de pelo menos um item pra criar o pedido.'
+  if (itens.some((i) => !i.produto_id && !i.servico_id)) return 'Cada item precisa ter produto_id ou servico_id.'
   if (!opts.nomeCliente.trim()) return 'Preciso do nome completo do cliente antes de gerar a cobrança.'
   if (!opts.emailCliente.trim() || !opts.emailCliente.includes('@')) return 'Preciso de um email válido do cliente antes de gerar a cobrança.'
 
@@ -281,7 +285,7 @@ async function criarPedidoEGerarCobranca(
     body: JSON.stringify({
       customer_name: opts.nomeCliente,
       customer_whatsapp: ctx.phone,
-      items: itens.map((i) => ({ product_id: i.produto_id, quantity: i.quantidade })),
+      items: itens.map((i) => ({ product_id: i.produto_id, service_id: i.servico_id, quantity: i.quantidade })),
       payment_method: paymentMethod,
     }),
   })
