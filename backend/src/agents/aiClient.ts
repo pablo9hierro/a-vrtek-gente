@@ -9,10 +9,10 @@ export type ChatMessage = { role: 'user' | 'assistant'; content: string }
 export type ToolCtx = { tenantSlug: string; phone: string; customerName: string | null }
 
 /**
- * Chama a IA e resolve tool calling — abstrai o provedor (Anthropic ou
- * OpenRouter) por trás de uma única assinatura, pra `pipeline.ts` nunca
- * precisar saber qual dos dois está em uso. `history` é a conversa (sem
- * incluir `userMessage`, que entra à parte).
+ * Chama a IA e resolve tool calling — abstrai o provedor (Anthropic,
+ * OpenAI ou OpenRouter) por trás de uma única assinatura, pra
+ * `pipeline.ts` nunca precisar saber qual dos três está em uso. `history`
+ * é a conversa (sem incluir `userMessage`, que entra à parte).
  */
 export async function completeWithTools(
   config: AssistantConfig,
@@ -22,16 +22,21 @@ export async function completeWithTools(
   toolCtx: ToolCtx,
 ): Promise<{ reply: string; toolCalls: ToolCallRecord[] }> {
   if (config.ai_provider === 'openrouter') {
-    return completeWithToolsOpenRouter(config, system, history, userMessage, toolCtx)
+    return completeWithToolsOpenAiCompatible(config, OPENROUTER_URL, 'anthropic/claude-3.5-sonnet', system, history, userMessage, toolCtx)
+  }
+  if (config.ai_provider === 'openai') {
+    return completeWithToolsOpenAiCompatible(config, OPENAI_URL, 'gpt-4o-mini', system, history, userMessage, toolCtx)
   }
   return completeWithToolsAnthropic(config, system, history, userMessage, toolCtx)
 }
 
 /** Sem ferramentas — usado só pela IA 1 (interpretação de intenção). */
 export async function completeSimple(config: AssistantConfig, system: string, userMessage: string): Promise<string> {
-  if (config.ai_provider === 'openrouter') {
-    const res = await openRouterFetch(config, {
-      model: openRouterModel(config),
+  if (config.ai_provider === 'openrouter' || config.ai_provider === 'openai') {
+    const url = config.ai_provider === 'openai' ? OPENAI_URL : OPENROUTER_URL
+    const defaultModel = config.ai_provider === 'openai' ? 'gpt-4o-mini' : 'anthropic/claude-3.5-sonnet'
+    const res = await openAiCompatibleFetch(config, url, {
+      model: config.ai_model?.trim() || defaultModel,
       messages: [
         { role: 'system', content: system },
         { role: 'user', content: userMessage },
@@ -52,7 +57,7 @@ export async function completeSimple(config: AssistantConfig, system: string, us
 function anthropicClient(config: AssistantConfig): Anthropic {
   const key = config.anthropic_api_key?.trim()
   // O mesmo campo guarda a chave de qualquer provedor escolhido — se o
-  // lojista trocou de OpenRouter pra Anthropic sem limpar o campo, a
+  // lojista trocou de outro provedor pra Anthropic sem limpar o campo, a
   // chave antiga não tem o formato certo (sk-ant-...) e quebraria com
   // 401; nesse caso ignora e cai no fallback global, em vez de falhar.
   return key && key.startsWith('sk-ant-') ? new Anthropic({ apiKey: key }) : defaultAnthropic
@@ -96,13 +101,10 @@ async function completeWithToolsAnthropic(
   return { reply: finalText, toolCalls }
 }
 
-// ---------- OpenRouter (formato compatível com a API de chat da OpenAI) ----------
+// ---------- OpenAI / OpenRouter (mesmo formato de chat completions + function calling) ----------
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions'
-
-function openRouterModel(config: AssistantConfig): string {
-  return config.ai_model?.trim() || 'anthropic/claude-3.5-sonnet'
-}
+const OPENAI_URL = 'https://api.openai.com/v1/chat/completions'
 
 type OrToolCall = { id: string; type: 'function'; function: { name: string; arguments: string } }
 type OrMessage = {
@@ -115,10 +117,10 @@ type OrResponse = {
   choices?: { message: OrMessage; finish_reason: string }[]
 }
 
-async function openRouterFetch(config: AssistantConfig, body: Record<string, unknown>): Promise<OrResponse> {
+async function openAiCompatibleFetch(config: AssistantConfig, url: string, body: Record<string, unknown>): Promise<OrResponse> {
   const key = config.anthropic_api_key?.trim()
-  if (!key) throw new Error('chave da OpenRouter não configurada pra essa loja')
-  const res = await fetch(OPENROUTER_URL, {
+  if (!key) throw new Error(`chave da API não configurada pra essa loja (provedor: ${config.ai_provider})`)
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -128,24 +130,27 @@ async function openRouterFetch(config: AssistantConfig, body: Record<string, unk
   })
   if (!res.ok) {
     const text = await res.text().catch(() => '')
-    throw new Error(`openrouter retornou ${res.status}: ${text}`)
+    throw new Error(`${config.ai_provider} retornou ${res.status}: ${text}`)
   }
   return (await res.json()) as OrResponse
 }
 
-/** Mesmo formato de `tools` (Anthropic) convertido pra "function calling" da OpenAI, que a OpenRouter espera. */
-const openRouterTools = tools.map((t) => ({
+/** Mesmo formato de `tools` (Anthropic) convertido pra "function calling" da OpenAI — usado tanto pra OpenAI quanto OpenRouter (mesmo schema). */
+const openAiTools = tools.map((t) => ({
   type: 'function' as const,
   function: { name: t.name, description: t.description, parameters: t.input_schema },
 }))
 
-async function completeWithToolsOpenRouter(
+async function completeWithToolsOpenAiCompatible(
   config: AssistantConfig,
+  url: string,
+  defaultModel: string,
   system: string,
   history: ChatMessage[],
   userMessage: string,
   toolCtx: ToolCtx,
 ): Promise<{ reply: string; toolCalls: ToolCallRecord[] }> {
+  const model = config.ai_model?.trim() || defaultModel
   const messages: OrMessage[] = [
     { role: 'system', content: system },
     ...history.map((m): OrMessage => ({ role: m.role, content: m.content })),
@@ -155,10 +160,10 @@ async function completeWithToolsOpenRouter(
   const toolCalls: ToolCallRecord[] = []
   let finalText = ''
   for (let i = 0; i < 4; i++) {
-    const res = await openRouterFetch(config, {
-      model: openRouterModel(config),
+    const res = await openAiCompatibleFetch(config, url, {
+      model,
       messages,
-      tools: openRouterTools,
+      tools: openAiTools,
     })
     const choice = res.choices?.[0]
     const message = choice?.message

@@ -76,7 +76,7 @@ configRouter.put('/:tenantSlug/config', betaGate, async (req, res) => {
       body.min_response_chars ?? 150,
       body.max_response_chars ?? 300,
       body.anthropic_api_key?.trim() || null,
-      body.ai_provider === 'openrouter' ? 'openrouter' : 'anthropic',
+      body.ai_provider === 'openrouter' ? 'openrouter' : body.ai_provider === 'openai' ? 'openai' : 'anthropic',
       body.ai_model?.trim() || null,
     ],
   )
