@@ -179,11 +179,29 @@ function servicoLink(tenantSlug: string, id: string): string {
   return `${STORE_BASE_URL}/loja/servico/${id}?tenant=${tenantSlug}`
 }
 
+/**
+ * Busca por PALAVRA, não frase exata — "reparo de câmera" precisa achar
+ * "Troca de Flash (Câmera) iPhone" mesmo sem a frase inteira bater como
+ * substring. Ignora palavras curtas/comuns (de, do, da, pra...) que só
+ * atrapalhariam o match. Casa se QUALQUER palavra relevante do termo
+ * aparecer em algum dos campos buscáveis do item.
+ */
+const STOPWORDS = new Set(['de', 'da', 'do', 'das', 'dos', 'a', 'o', 'e', 'pra', 'para', 'com', 'um', 'uma'])
+function matchesTermo(termo: string, ...campos: (string | undefined)[]): boolean {
+  const palavras = termo
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((w) => w.length > 1 && !STOPWORDS.has(w))
+  if (palavras.length === 0) return true
+  const alvo = campos.filter(Boolean).join(' ').toLowerCase()
+  return palavras.some((w) => alvo.includes(w))
+}
+
 async function buscarProdutos(tenantSlug: string, termo: string): Promise<string> {
   const res = await fetch(`${ECOMMERCE_API_URL}/api/public/catalog/${tenantSlug}/products`)
   if (!res.ok) return 'Não foi possível consultar o catálogo agora.'
   const products = (await res.json()) as { id: string; name: string; price: number; description?: string; image_url?: string }[]
-  const filtered = termo ? products.filter((p) => p.name.toLowerCase().includes(termo.toLowerCase())) : products
+  const filtered = termo ? products.filter((p) => matchesTermo(termo, p.name, p.description)) : products
   if (filtered.length === 0) return termo ? `Nenhum produto encontrado pra "${termo}".` : 'A loja não tem produtos cadastrados no catálogo ainda.'
   return filtered
     .slice(0, 20)
@@ -198,9 +216,7 @@ async function buscarServicos(tenantSlug: string, termo: string): Promise<string
   const res = await fetch(`${ECOMMERCE_API_URL}/api/public/catalog/${tenantSlug}/services`)
   if (!res.ok) return 'Não foi possível consultar os serviços agora.'
   const services = (await res.json()) as { id: string; name: string; description: string; category_name?: string; price: number }[]
-  const filtered = termo
-    ? services.filter((s) => s.name.toLowerCase().includes(termo.toLowerCase()) || (s.category_name ?? '').toLowerCase().includes(termo.toLowerCase()))
-    : services
+  const filtered = termo ? services.filter((s) => matchesTermo(termo, s.name, s.category_name, s.description)) : services
   if (filtered.length === 0) return termo ? `Nenhum serviço encontrado pra "${termo}".` : 'A loja não tem serviços cadastrados ainda.'
   return filtered
     .slice(0, 20)
