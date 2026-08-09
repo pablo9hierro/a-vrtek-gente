@@ -100,7 +100,7 @@ export const tools: Anthropic.Tool[] = [
   {
     name: 'criar_pedido_e_gerar_cobranca',
     description:
-      'Cria de verdade um pedido com os produtos e/ou serviços que o cliente confirmou (depois de já ter visto e aceitado a prévia do carrinho via montar_carrinho) e gera a cobrança no método escolhido pelo cliente (pix ou link de cobrança/cartão). Use SÓ depois que o cliente: (1) confirmou os itens na prévia do carrinho, (2) informou nome e email, (3) escolheu o método de pagamento. Nunca invente nome, email ou método — pergunte se faltar. Se o serviço depender de peça em estoque e não tiver disponibilidade suficiente, a chamada falha — nesse caso avise que não tem peça disponível agora. Pedido sempre nasce como retirada no local (esse atendimento por WhatsApp ainda não coleta endereço/entrega) e pendente de pagamento — nunca já pago.',
+      'Cria de verdade um pedido com os produtos e/ou serviços que o cliente confirmou (depois de já ter visto e aceitado a prévia do carrinho via montar_carrinho) e gera a cobrança no método escolhido pelo cliente (pix ou link de cobrança/cartão). Use SÓ depois que o cliente: (1) confirmou os itens na prévia do carrinho, (2) informou nome e email, (3) escolheu o método de pagamento, e (4) se pediu entrega/coleta, já compartilhou a localização fixa no chat. Nunca invente nome, email, método ou localização — pergunte se faltar. Se o serviço depender de peça em estoque e não tiver disponibilidade suficiente, a chamada falha — nesse caso avise que não tem peça disponível agora. Pedido sempre nasce pendente de pagamento — nunca já pago.',
     input_schema: {
       type: 'object',
       properties: {
@@ -123,6 +123,14 @@ export const tools: Anthropic.Tool[] = [
           type: 'string',
           enum: ['pix', 'link_cobranca'],
           description: '"pix" gera código copia-e-cola. "link_cobranca" gera um link de pagamento por cartão.',
+        },
+        quer_entrega_ou_coleta: {
+          type: 'boolean',
+          description: 'true se o cliente pediu entrega (produto) ou coleta+entrega do aparelho (serviço). false pra retirada no local.',
+        },
+        localizacao_compartilhada: {
+          type: 'string',
+          description: 'O texto/link exato da localização que o cliente compartilhou no chat (aparece no histórico como "[Cliente compartilhou localização fixa: ...]"). Obrigatório se quer_entrega_ou_coleta=true.',
         },
       },
       required: ['itens', 'nome_cliente', 'email_cliente', 'metodo_pagamento'],
@@ -153,6 +161,8 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
         nomeCliente: String(input.nome_cliente ?? ''),
         emailCliente: String(input.email_cliente ?? ''),
         metodoPagamento: input.metodo_pagamento === 'link_cobranca' ? 'link_cobranca' : 'pix',
+        querEntregaOuColeta: Boolean(input.quer_entrega_ou_coleta),
+        localizacaoCompartilhada: input.localizacao_compartilhada ? String(input.localizacao_compartilhada) : null,
       })
     }
     return `Ferramenta desconhecida: ${name}`
@@ -271,12 +281,21 @@ function montarCarrinho(
 async function criarPedidoEGerarCobranca(
   ctx: ToolCtx,
   itens: { produto_id?: string; servico_id?: string; quantidade: number }[],
-  opts: { nomeCliente: string; emailCliente: string; metodoPagamento: 'pix' | 'link_cobranca' },
+  opts: {
+    nomeCliente: string
+    emailCliente: string
+    metodoPagamento: 'pix' | 'link_cobranca'
+    querEntregaOuColeta: boolean
+    localizacaoCompartilhada: string | null
+  },
 ): Promise<string> {
   if (itens.length === 0) return 'Preciso de pelo menos um item pra criar o pedido.'
   if (itens.some((i) => !i.produto_id && !i.servico_id)) return 'Cada item precisa ter produto_id ou servico_id.'
   if (!opts.nomeCliente.trim()) return 'Preciso do nome completo do cliente antes de gerar a cobrança.'
   if (!opts.emailCliente.trim() || !opts.emailCliente.includes('@')) return 'Preciso de um email válido do cliente antes de gerar a cobrança.'
+  if (opts.querEntregaOuColeta && !opts.localizacaoCompartilhada?.trim()) {
+    return 'Preciso que o cliente compartilhe a localização fixa no chat antes de gerar a cobrança, já que ele pediu entrega/coleta.'
+  }
 
   const paymentMethod = opts.metodoPagamento === 'link_cobranca' ? 'cartao' : 'pix'
   const orderRes = await fetch(`${ECOMMERCE_API_URL}/api/public/catalog/${ctx.tenantSlug}/assistant-order`, {
@@ -308,7 +327,10 @@ async function criarPedidoEGerarCobranca(
     if (!paid.pix_copia_cola) {
       return `Pedido criado (total R$ ${totalFmt}), mas o Pix ainda não veio pronto. Avise que um atendente vai mandar o pagamento.`
     }
-    return `Pedido criado com sucesso! Total: R$ ${totalFmt}. Código Pix copia-e-cola (mande esse código EXATO pro cliente, ele deve colar no app do banco):\n${paid.pix_copia_cola}`
+    const entregaNote = opts.querEntregaOuColeta
+      ? ' Avise também que a entrega/coleta no endereço compartilhado será combinada por um atendente assim que o pagamento for confirmado.'
+      : ''
+    return `Pedido criado com sucesso! Total: R$ ${totalFmt}. Código Pix copia-e-cola (mande esse código EXATO pro cliente, ele deve colar no app do banco):\n${paid.pix_copia_cola}${entregaNote}`
   }
 
   const linkRes = await fetch(`${ECOMMERCE_API_URL}/api/orders/${order.id}/card-link`, { method: 'POST' })
@@ -319,5 +341,8 @@ async function criarPedidoEGerarCobranca(
   if (!paid.card_payment_link_url) {
     return `Pedido criado (total R$ ${totalFmt}), mas o link de cobrança ainda não veio pronto. Avise que um atendente vai mandar o pagamento.`
   }
-  return `Pedido criado com sucesso! Total: R$ ${totalFmt}. Link de pagamento por cartão (mande esse link EXATO pro cliente):\n${paid.card_payment_link_url}`
+  const entregaNote = opts.querEntregaOuColeta
+    ? ' Avise também que a entrega/coleta no endereço compartilhado será combinada por um atendente assim que o pagamento for confirmado.'
+    : ''
+  return `Pedido criado com sucesso! Total: R$ ${totalFmt}. Link de pagamento por cartão (mande esse link EXATO pro cliente):\n${paid.card_payment_link_url}${entregaNote}`
 }
