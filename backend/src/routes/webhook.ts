@@ -162,7 +162,7 @@ async function processBatch(conversationId: string, config: AssistantConfig) {
       [conversationId],
     )
 
-    const result = await runPipeline(config, historyRes.rows, joinedText, batch.phone, batch.customerName)
+    const result = await runPipeline(config, historyRes.rows, joinedText, batch.phone, batch.customerName, batch.instance)
 
     const outboundMessage = await pool.query<{ id: string }>(
       `INSERT INTO assistant_ia.messages (conversation_id, tenant_id, direction, sender_type, content)

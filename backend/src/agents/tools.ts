@@ -1,4 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk'
+import { sendWhatsappLocation } from '../evolution-adapter/send.js'
 
 /**
  * Ferramentas que a IA pode chamar pra consultar/agir em dados REAIS da
@@ -57,7 +58,7 @@ export const tools: Anthropic.Tool[] = [
   {
     name: 'consultar_localizacao_loja',
     description:
-      'Consulta o endereço/localização real da loja. Use sempre que o cliente perguntar onde a loja fica, o endereço, ou pedir a localização pra ir buscar/entregar algo.',
+      'Manda a localização real da loja como PIN de localização de verdade no WhatsApp do cliente (não é só texto — a ferramenta já envia o pin sozinha). Use sempre que o cliente perguntar onde a loja fica, o endereço, ou pedir a localização pra ir buscar/entregar algo. Depois de usar, só confirme em texto que mandou.',
     input_schema: {
       type: 'object',
       properties: {},
@@ -138,14 +139,14 @@ export const tools: Anthropic.Tool[] = [
   },
 ]
 
-type ToolCtx = { tenantSlug: string; phone: string; customerName: string | null }
+type ToolCtx = { tenantSlug: string; phone: string; customerName: string | null; instance: string }
 
 export async function executeTool(name: string, input: Record<string, unknown>, ctx: ToolCtx): Promise<string> {
   try {
     if (name === 'buscar_produtos') return await buscarProdutos(ctx.tenantSlug, String(input.termo ?? ''))
     if (name === 'buscar_servicos') return await buscarServicos(ctx.tenantSlug, String(input.termo ?? ''))
     if (name === 'consultar_horario_funcionamento') return await consultarHorario(ctx.tenantSlug)
-    if (name === 'consultar_localizacao_loja') return await consultarLocalizacao(ctx.tenantSlug)
+    if (name === 'consultar_localizacao_loja') return await consultarLocalizacao(ctx)
     if (name === 'consultar_pedido') return await consultarPedido(ctx.tenantSlug, ctx.phone)
     if (name === 'montar_carrinho') {
       const itens = Array.isArray(input.itens)
@@ -248,11 +249,15 @@ async function consultarHorario(tenantSlug: string): Promise<string> {
   return lines.join('\n') + closedNote
 }
 
-async function consultarLocalizacao(tenantSlug: string): Promise<string> {
-  const res = await fetch(`${ECOMMERCE_API_URL}/api/public/catalog/${tenantSlug}/store-status`)
+async function consultarLocalizacao(ctx: ToolCtx): Promise<string> {
+  const res = await fetch(`${ECOMMERCE_API_URL}/api/public/catalog/${ctx.tenantSlug}/store-status`)
   if (!res.ok) return 'Não foi possível consultar a localização da loja agora.'
-  const status = (await res.json()) as { pickup_address?: string }
+  const status = (await res.json()) as { pickup_address?: string; pickup_lat?: number | null; pickup_lng?: number | null }
   if (!status.pickup_address) return 'A loja ainda não cadastrou o endereço de retirada.'
+  if (status.pickup_lat != null && status.pickup_lng != null) {
+    const sent = await sendWhatsappLocation(ctx.instance, ctx.phone, status.pickup_lat, status.pickup_lng, 'Localização da loja', status.pickup_address)
+    if (sent) return `Localização da loja enviada como PIN no WhatsApp (endereço: ${status.pickup_address}).`
+  }
   return `Endereço da loja: ${status.pickup_address}`
 }
 

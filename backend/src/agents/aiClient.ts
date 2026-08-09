@@ -6,7 +6,7 @@ const defaultAnthropic = new Anthropic() // lê ANTHROPIC_API_KEY do ambiente
 
 export type ToolCallRecord = { tool: string; input: unknown; output: string }
 export type ChatMessage = { role: 'user' | 'assistant'; content: string }
-export type ToolCtx = { tenantSlug: string; phone: string; customerName: string | null }
+export type ToolCtx = { tenantSlug: string; phone: string; customerName: string | null; instance: string }
 
 /**
  * Chama a IA e resolve tool calling — abstrai o provedor (Anthropic,

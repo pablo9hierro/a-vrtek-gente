@@ -16,6 +16,10 @@ function universalValidatorRules(config: AssistantConfig): string {
     '- Antes de gerar QUALQUER cobrança (Pix ou link de cartão), primeiro use a ferramenta montar_carrinho pra mandar a prévia dos itens (nome + link) e obter confirmação explícita do cliente. Nunca pule direto pra criar_pedido_e_gerar_cobranca sem essa prévia já ter sido confirmada na conversa.',
     '- Depois da confirmação do carrinho, pergunte se o cliente quer entrega/coleta: entrega em casa (se for produto) ou coleta e entrega do aparelho (se for serviço de reparo/manutenção). Se ele quiser, peça pra ele compartilhar a localização fixa AQUI no WhatsApp (o app tem a opção "Localização" -> "Localização atual/fixa") ANTES de gerar a cobrança — nunca aceite endereço só escrito por texto, precisa ser o compartilhamento de localização mesmo.',
     '- Pra gerar a cobrança final (criar_pedido_e_gerar_cobranca) você PRECISA ter, vindos da própria conversa com o cliente: nome completo, email, o método de pagamento escolhido (pix ou link_cobranca), e se ele pediu entrega/coleta, a localização compartilhada (aparece na conversa como "[Cliente compartilhou localização fixa: ...]"). Se qualquer um desses faltar, NÃO chame a ferramenta — primeiro peça o que falta.',
+    '- ECONOMIA DE INTERAÇÃO (regra crítica, cada mensagem trocada custa tempo e dinheiro): antes de pedir nome/email/método de pagamento/localização, RELEIA o histórico da conversa inteiro — se o cliente já informou algum desses dados em qualquer mensagem anterior desta mesma conversa (mesmo que tenha sido pra outro item/pedido), REAPROVEITE, nunca peça de novo. Se já tiver TUDO que falta (dados + confirmação do carrinho), chame criar_pedido_e_gerar_cobranca NA MESMA resposta, sem pedir confirmação extra de novo.',
+    '- Ao montar/atualizar um carrinho quando você já tem nome/email/método de pagamento de uma interação anterior na conversa, faça a prévia do carrinho E JÁ pergunte "confirma esse carrinho pra eu gerar o pagamento com [nome], [email], via [método]?" numa única mensagem — não separe em duas rodadas (uma só de confirmar carrinho, outra só de pedir dados) se os dados já existem.',
+    '- Quando o cliente confirmar ("sim", "confirmo", "pode gerar", etc.) e todos os dados necessários já estiverem na conversa (mesmo que informados antes), chame criar_pedido_e_gerar_cobranca IMEDIATAMENTE nessa resposta — nunca responda só texto tipo "vou gerar" ou "só um instante" sem ter chamado a ferramenta de verdade. Se a ferramenta falhar, diga exatamente o que a ferramenta retornou de erro, nunca invente "erro no sistema" genérico.',
+    '- IMPORTANTE: a regra de reaproveitar dado do histórico (linha "ECONOMIA DE INTERAÇÃO") vale SÓ pra nome/email/método de pagamento/localização do cliente — nunca pra produto/serviço. Se o cliente pedir um item novo que ainda não apareceu na conversa (mesmo que pareça parecido com algo já buscado antes), você é OBRIGADO a rodar buscar_produtos/buscar_servicos de novo pra esse item — nunca responda usando um resultado de busca antigo/de outro item como se fosse cache do item novo.',
     '- PROIBIDO alucinar: nunca cite nome de produto/serviço, preço, id, link, código Pix, link de pagamento ou status de pedido que não esteja LITERALMENTE no resultado de uma chamada de ferramenta desta mesma interação. Se você não chamou buscar_produtos/buscar_servicos NESTA interação, não afirme nada sobre o que existe ou não existe no catálogo — chame a ferramenta primeiro, mesmo que ache que já sabe a resposta de uma mensagem anterior seu.',
     '- Antes de aceitar/confirmar QUALQUER item específico que o cliente pediu (pra montar carrinho ou fechar pedido), rode buscar_produtos ou buscar_servicos DE NOVO com o termo certo pra confirmar nome exato, id e preço reais — mesmo que você (ou uma versão anterior sua na mesma conversa) já tenha mencionado esse item antes. Nunca reafirme de memória.',
     '- Se o cliente descreveu um problema de aparelho (tela, bateria, câmera/flash, placa, "caiu na água", "não liga"), sempre rode buscar_servicos com o termo do aparelho/marca/peça ANTES de responder — não diga "não temos" nem "temos" sem ter acabado de consultar.',
@@ -76,7 +80,7 @@ async function runValidatorAndRespond(
   history: { sender_type: string; content: string }[],
   userMessage: string,
   interpreterOutput: InterpreterOutput,
-  toolCtx: { tenantSlug: string; phone: string; customerName: string | null },
+  toolCtx: { tenantSlug: string; phone: string; customerName: string | null; instance: string },
   ragContext: string,
 ): Promise<{ reply: string; toolCalls: ToolCallRecord[] }> {
   const system = [
@@ -138,6 +142,7 @@ export async function runPipeline(
   userMessage: string,
   phone: string,
   customerName: string | null,
+  instance: string,
 ): Promise<PipelineResult> {
   const interpreterOutput = await runInterpreter(config, userMessage)
   const ragContext = await searchRag(config.tenant_id, userMessage)
@@ -146,7 +151,7 @@ export async function runPipeline(
     history,
     userMessage,
     interpreterOutput,
-    { tenantSlug: config.tenant_id, phone, customerName },
+    { tenantSlug: config.tenant_id, phone, customerName, instance },
     ragContext,
   )
   return { reply, interpreterOutput, toolCalls }
