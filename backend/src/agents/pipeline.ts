@@ -1,14 +1,5 @@
-import Anthropic from '@anthropic-ai/sdk'
 import { pool } from '../db/pool.js'
-import { tools, executeTool } from './tools.js'
-
-const defaultAnthropic = new Anthropic() // lê ANTHROPIC_API_KEY do ambiente
-
-/** Chave própria do lojista (definida em /meu-plano/assistente-ia) tem prioridade — fallback pra ANTHROPIC_API_KEY global do processo quando o crédito acabar. */
-function anthropicFor(config: AssistantConfig): Anthropic {
-  const key = config.anthropic_api_key?.trim()
-  return key ? new Anthropic({ apiKey: key }) : defaultAnthropic
-}
+import { completeSimple, completeWithTools, type ToolCallRecord } from './aiClient.js'
 
 /**
  * Regras universais do Assistente IA como um todo — valem pra QUALQUER
@@ -43,11 +34,13 @@ export type AssistantConfig = {
   message_batch_window_seconds: number
   min_response_chars: number
   max_response_chars: number
-  /** Chave própria da Anthropic pra essa loja — null/vazia usa a global do processo. */
+  /** Chave própria da loja pro motor de IA escolhido — null/vazia usa a global do processo (só vale pra "anthropic"; "openrouter" exige chave própria). */
   anthropic_api_key: string | null
+  /** "anthropic" (padrão) ou "openrouter". */
+  ai_provider: string
+  /** Só relevante/obrigatório pra "openrouter" — ex: "anthropic/claude-3.5-sonnet". */
+  ai_model: string | null
 }
-
-type ToolCallRecord = { tool: string; input: unknown; output: string }
 
 type InterpreterOutput = {
   intent: string
@@ -63,13 +56,7 @@ async function runInterpreter(config: AssistantConfig, userMessage: string): Pro
     'Intenções possíveis: consultar_pedido, montar_pedido, consultar_catalogo, duvida_loja, calcular_frete, encaminhar_humano, buscar_cupom, buscar_produto, horario_funcionamento, pedir_esclarecimento, outro.',
   ].join('\n')
 
-  const res = await anthropicFor(config).messages.create({
-    model: 'claude-opus-5',
-    max_tokens: 1024,
-    system,
-    messages: [{ role: 'user', content: userMessage }],
-  })
-  const text = res.content.find((b) => b.type === 'text')?.text ?? '{}'
+  const text = await completeSimple(config, system, userMessage)
   return safeParseJson<InterpreterOutput>(text, { intent: 'outro', params: {} })
 }
 
@@ -99,43 +86,11 @@ async function runValidatorAndRespond(
     .filter(Boolean)
     .join('\n\n')
 
-  const messages: Anthropic.MessageParam[] = history.map((m) => ({
-    role: m.sender_type === 'cliente' ? 'user' : 'assistant',
-    content: m.content,
-  }))
-  messages.push({ role: 'user', content: userMessage })
-
-  const toolCalls: ToolCallRecord[] = []
-  const client = anthropicFor(config)
-
-  let finalText = ''
-  for (let i = 0; i < 4; i++) {
-    const res = await client.messages.create({
-      model: 'claude-opus-5',
-      max_tokens: 1024,
-      system,
-      tools,
-      messages,
-    })
-
-    if (res.stop_reason !== 'tool_use') {
-      finalText = res.content.find((b) => b.type === 'text')?.text ?? ''
-      break
-    }
-
-    messages.push({ role: 'assistant', content: res.content })
-    const toolResults: Anthropic.ToolResultBlockParam[] = []
-    for (const block of res.content) {
-      if (block.type !== 'tool_use') continue
-      const output = await executeTool(block.name, block.input as Record<string, unknown>, toolCtx)
-      toolCalls.push({ tool: block.name, input: block.input, output })
-      toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: output })
-    }
-    messages.push({ role: 'user', content: toolResults })
-  }
+  const chatHistory = history.map((m) => ({ role: m.sender_type === 'cliente' ? ('user' as const) : ('assistant' as const), content: m.content }))
+  const { reply, toolCalls } = await completeWithTools(config, system, chatHistory, userMessage, toolCtx)
 
   return {
-    reply: finalText || 'Desculpa, não consegui gerar uma resposta agora — já chamo alguém pra te ajudar.',
+    reply: reply || 'Desculpa, não consegui gerar uma resposta agora — já chamo alguém pra te ajudar.',
     toolCalls,
   }
 }

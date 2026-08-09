@@ -33,6 +33,8 @@ configRouter.get('/:tenantSlug/config', betaGate, async (req, res) => {
       min_response_chars: 150,
       max_response_chars: 300,
       anthropic_api_key: null,
+      ai_provider: 'anthropic',
+      ai_model: null,
     })
     return
   }
@@ -45,8 +47,8 @@ configRouter.put('/:tenantSlug/config', betaGate, async (req, res) => {
   const { rows } = await pool.query<AssistantConfig>(
     `INSERT INTO assistant_ia.assistant_config
        (tenant_id, enabled, prompt_interpreter, prompt_validator, start_keywords, end_keywords, window_timeout_minutes,
-        message_batch_window_seconds, min_response_chars, max_response_chars, anthropic_api_key, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+        message_batch_window_seconds, min_response_chars, max_response_chars, anthropic_api_key, ai_provider, ai_model, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
      ON CONFLICT (tenant_id) DO UPDATE SET
        enabled = EXCLUDED.enabled,
        prompt_interpreter = EXCLUDED.prompt_interpreter,
@@ -58,6 +60,8 @@ configRouter.put('/:tenantSlug/config', betaGate, async (req, res) => {
        min_response_chars = EXCLUDED.min_response_chars,
        max_response_chars = EXCLUDED.max_response_chars,
        anthropic_api_key = EXCLUDED.anthropic_api_key,
+       ai_provider = EXCLUDED.ai_provider,
+       ai_model = EXCLUDED.ai_model,
        updated_at = now()
      RETURNING *`,
     [
@@ -72,6 +76,8 @@ configRouter.put('/:tenantSlug/config', betaGate, async (req, res) => {
       body.min_response_chars ?? 150,
       body.max_response_chars ?? 300,
       body.anthropic_api_key?.trim() || null,
+      body.ai_provider === 'openrouter' ? 'openrouter' : 'anthropic',
+      body.ai_model?.trim() || null,
     ],
   )
   res.json(rows[0])
