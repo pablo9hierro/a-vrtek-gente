@@ -65,6 +65,21 @@ export const tools: Anthropic.Tool[] = [
     },
   },
   {
+    name: 'calcular_valor_entrega',
+    description:
+      'Calcula o valor REAL da entrega/coleta, usando o preço por km cadastrado pelo lojista (o mesmo valor que a loja cobra no checkout normal) e a distância até a localização que o cliente compartilhou. Use SEMPRE que o cliente pedir entrega/coleta, depois que ele já compartilhou a localização fixa no chat — nunca invente ou estime o valor da entrega de outro jeito.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        localizacao_compartilhada: {
+          type: 'string',
+          description: 'O texto exato que apareceu no histórico como "[Cliente compartilhou localização fixa: https://maps.google.com/?q=lat,lng]".',
+        },
+      },
+      required: ['localizacao_compartilhada'],
+    },
+  },
+  {
     name: 'consultar_pedido',
     description:
       'Consulta os pedidos recentes do cliente (pelo telefone da própria conversa) na loja de verdade. Use sempre que o cliente perguntar sobre status/andamento de um pedido já feito.',
@@ -101,7 +116,7 @@ export const tools: Anthropic.Tool[] = [
   {
     name: 'criar_pedido_e_gerar_cobranca',
     description:
-      'Cria de verdade um pedido com os produtos e/ou serviços que o cliente confirmou (depois de já ter visto e aceitado a prévia do carrinho via montar_carrinho) e gera a cobrança no método escolhido pelo cliente (pix ou link de cobrança/cartão). Use SÓ depois que o cliente: (1) confirmou os itens na prévia do carrinho, (2) informou nome e email, (3) escolheu o método de pagamento, e (4) se pediu entrega/coleta, já compartilhou a localização fixa no chat. Nunca invente nome, email, método ou localização — pergunte se faltar. Se o serviço depender de peça em estoque e não tiver disponibilidade suficiente, a chamada falha — nesse caso avise que não tem peça disponível agora. Pedido sempre nasce pendente de pagamento — nunca já pago.',
+      'Cria de verdade um pedido com os produtos e/ou serviços que o cliente confirmou (depois de já ter visto e aceitado a prévia do carrinho via montar_carrinho) e gera a cobrança no método escolhido pelo cliente (pix ou link de cobrança/cartão). Use SÓ depois que o cliente: (1) confirmou os itens na prévia do carrinho, (2) informou nome e email, (3) escolheu o método de pagamento, e (4) se pediu entrega/coleta, já compartilhou a localização E você já rodou calcular_valor_entrega pra saber o valor real (passe esse valor em valor_entrega). Nunca invente nome, email, método, localização ou valor de entrega — pergunte/calcule se faltar. Se o serviço depender de peça em estoque e não tiver disponibilidade suficiente, a chamada falha — nesse caso avise que não tem peça disponível agora. Pedido sempre nasce pendente de pagamento — nunca já pago.',
     input_schema: {
       type: 'object',
       properties: {
@@ -133,6 +148,10 @@ export const tools: Anthropic.Tool[] = [
           type: 'string',
           description: 'O texto/link exato da localização que o cliente compartilhou no chat (aparece no histórico como "[Cliente compartilhou localização fixa: ...]"). Obrigatório se quer_entrega_ou_coleta=true.',
         },
+        valor_entrega: {
+          type: 'number',
+          description: 'O valor de entrega/coleta que a tool calcular_valor_entrega retornou (número puro, ex: 12.50) — obrigatório se quer_entrega_ou_coleta=true. NUNCA um valor inventado/estimado por você.',
+        },
       },
       required: ['itens', 'nome_cliente', 'email_cliente', 'metodo_pagamento'],
     },
@@ -147,6 +166,7 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
     if (name === 'buscar_servicos') return await buscarServicos(ctx.tenantSlug, String(input.termo ?? ''))
     if (name === 'consultar_horario_funcionamento') return await consultarHorario(ctx.tenantSlug)
     if (name === 'consultar_localizacao_loja') return await consultarLocalizacao(ctx)
+    if (name === 'calcular_valor_entrega') return await calcularValorEntrega(ctx.tenantSlug, String(input.localizacao_compartilhada ?? ''))
     if (name === 'consultar_pedido') return await consultarPedido(ctx.tenantSlug, ctx.phone)
     if (name === 'montar_carrinho') {
       const itens = Array.isArray(input.itens)
@@ -164,6 +184,7 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
         metodoPagamento: input.metodo_pagamento === 'link_cobranca' ? 'link_cobranca' : 'pix',
         querEntregaOuColeta: Boolean(input.quer_entrega_ou_coleta),
         localizacaoCompartilhada: input.localizacao_compartilhada ? String(input.localizacao_compartilhada) : null,
+        valorEntrega: typeof input.valor_entrega === 'number' ? input.valor_entrega : null,
       })
     }
     return `Ferramenta desconhecida: ${name}`
@@ -261,6 +282,37 @@ async function consultarLocalizacao(ctx: ToolCtx): Promise<string> {
   return `Endereço da loja: ${status.pickup_address}`
 }
 
+/** Extrai lat/lng do texto "[Cliente compartilhou localização fixa: https://maps.google.com/?q=lat,lng]". */
+function parseLatLngFromLocationText(text: string): { lat: number; lng: number } | null {
+  const match = text.match(/[?&]q=(-?\d+\.?\d*),(-?\d+\.?\d*)/)
+  if (!match) return null
+  const lat = Number(match[1])
+  const lng = Number(match[2])
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
+  return { lat, lng }
+}
+
+async function calcularValorEntrega(tenantSlug: string, localizacaoCompartilhada: string): Promise<string> {
+  const coords = parseLatLngFromLocationText(localizacaoCompartilhada)
+  if (!coords) return 'Preciso que o cliente compartilhe a localização fixa no chat antes de calcular o valor da entrega.'
+  const res = await fetch(`${ECOMMERCE_API_URL}/api/public/catalog/${tenantSlug}/estimate-delivery`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lat: coords.lat, lng: coords.lng }),
+  })
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    return `Não consegui calcular o valor da entrega agora: ${body || res.status}`
+  }
+  const data = (await res.json()) as { km: number; price: number; within_range: boolean }
+  const priceFmt = data.price.toFixed(2).replace('.', ',')
+  const kmFmt = data.km.toFixed(1).replace('.', ',')
+  if (!data.within_range) {
+    return `O endereço fica a ${kmFmt} km da loja, fora da área de entrega. Avise o cliente que essa entrega não é possível — só retirada no local.`
+  }
+  return `Valor real da entrega/coleta: R$ ${priceFmt} (${kmFmt} km até a loja, calculado pelo preço por km cadastrado na loja).`
+}
+
 async function consultarPedido(tenantSlug: string, phone: string): Promise<string> {
   const res = await fetch(`${ECOMMERCE_API_URL}/api/public/catalog/${tenantSlug}/orders-by-phone/${phone}`)
   if (!res.ok) return 'Não foi possível consultar pedidos agora.'
@@ -308,6 +360,7 @@ async function criarPedidoEGerarCobranca(
     metodoPagamento: 'pix' | 'link_cobranca'
     querEntregaOuColeta: boolean
     localizacaoCompartilhada: string | null
+    valorEntrega: number | null
   },
 ): Promise<string> {
   if (itens.length === 0) return 'Preciso de pelo menos um item pra criar o pedido.'
@@ -316,6 +369,9 @@ async function criarPedidoEGerarCobranca(
   if (!opts.emailCliente.trim() || !opts.emailCliente.includes('@')) return 'Preciso de um email válido do cliente antes de gerar a cobrança.'
   if (opts.querEntregaOuColeta && !opts.localizacaoCompartilhada?.trim()) {
     return 'Preciso que o cliente compartilhe a localização fixa no chat antes de gerar a cobrança, já que ele pediu entrega/coleta.'
+  }
+  if (opts.querEntregaOuColeta && (opts.valorEntrega == null || opts.valorEntrega < 0)) {
+    return 'Preciso rodar calcular_valor_entrega antes de gerar a cobrança, já que o cliente pediu entrega/coleta — não posso cobrar entrega sem o valor real calculado.'
   }
 
   const paymentMethod = opts.metodoPagamento === 'link_cobranca' ? 'cartao' : 'pix'
@@ -327,6 +383,7 @@ async function criarPedidoEGerarCobranca(
       customer_whatsapp: ctx.phone,
       items: itens.map((i) => ({ product_id: i.produto_id, service_id: i.servico_id, quantity: i.quantidade })),
       payment_method: paymentMethod,
+      shipping_price: opts.querEntregaOuColeta ? opts.valorEntrega : null,
     }),
   })
   if (!orderRes.ok) {
