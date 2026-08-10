@@ -107,11 +107,48 @@ async function runValidatorAndRespond(
 
   const chatHistory = history.map((m) => ({ role: m.sender_type === 'cliente' ? ('user' as const) : ('assistant' as const), content: m.content }))
   const { reply, toolCalls } = await completeWithTools(config, system, chatHistory, userMessage, toolCtx)
+  const safeReply = reply || 'Desculpa, não consegui gerar uma resposta agora — já chamo alguém pra te ajudar.'
 
   return {
-    reply: reply || 'Desculpa, não consegui gerar uma resposta agora — já chamo alguém pra te ajudar.',
+    reply: enforcePaymentCodeSplit(safeReply, toolCalls),
     toolCalls,
   }
+}
+
+/**
+ * Extrai o código Pix / link de pagamento LITERAL retornado por
+ * criar_pedido_e_gerar_cobranca (sempre a última linha do texto que a tool
+ * devolve — ver tools.ts) e garante que ele saia como mensagem própria,
+ * separada do aviso, via MSG_SPLIT_MARKER — SEM depender do modelo lembrar
+ * de formatar isso sozinho (com modelos menores/max_response_chars baixo,
+ * a instrução de prompt sozinha não é confiável o suficiente).
+ */
+function enforcePaymentCodeSplit(reply: string, toolCalls: ToolCallRecord[]): string {
+  const chargeCall = [...toolCalls].reverse().find((t) => t.tool === 'criar_pedido_e_gerar_cobranca')
+  if (!chargeCall) return reply
+  const lines = chargeCall.output.trim().split('\n')
+  const code = lines[lines.length - 1]?.trim()
+  // Só considera "código real" se parecer um copia-e-cola Pix (EMV, começa
+  // com "000201") ou um link de pagamento (http) — nunca uma frase de erro
+  // (as mensagens de erro da tool não terminam assim).
+  const looksLikeRealCode = !!code && (code.startsWith('000201') || code.startsWith('http'))
+  if (!looksLikeRealCode) return reply
+
+  if (reply.includes(MSG_SPLIT_MARKER)) {
+    // Modelo já tentou separar — só garante que a segunda parte é EXATAMENTE
+    // o código puro, sem nada grudado (nem antes, nem depois).
+    const idx = reply.indexOf(MSG_SPLIT_MARKER)
+    const before = reply.slice(0, idx)
+    return `${before}${MSG_SPLIT_MARKER}${code}`
+  }
+
+  // Modelo não usou o marcador — força o split mesmo assim. Se o texto
+  // devolvido pelo modelo contém o código literal, tira ele de lá e some
+  // com o resto como aviso; se nem contém (paráfrase/truncamento), ainda
+  // assim anexa o código real como segunda mensagem garantida.
+  const parts = reply.split(code)
+  const aviso = parts.length > 1 ? parts.join(' ').trim() : reply.trim()
+  return `${aviso}${MSG_SPLIT_MARKER}${code}`
 }
 
 function safeParseJson<T>(text: string, fallback: T): T {
