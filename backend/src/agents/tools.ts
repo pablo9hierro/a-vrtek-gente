@@ -406,9 +406,12 @@ async function criarPedidoEGerarCobranca(
       return `Pedido criado (total R$ ${totalFmt}), mas o Pix ainda não veio pronto. Avise que um atendente vai mandar o pagamento.`
     }
     const entregaNote = opts.querEntregaOuColeta
-      ? ' Avise também que a entrega/coleta no endereço compartilhado será combinada por um atendente assim que o pagamento for confirmado.'
+      ? ' A entrega/coleta no endereço compartilhado será combinada por um atendente assim que o pagamento for confirmado.'
       : ''
-    return `Pedido criado com sucesso! Total: R$ ${totalFmt}. Código Pix copia-e-cola (mande esse código EXATO pro cliente, ele deve colar no app do banco):\n${paid.pix_copia_cola}${entregaNote}`
+    // IMPORTANTE pra IA: o código Pix abaixo vai SOZINHO na segunda parte da
+    // mensagem (depois do marcador de split) — nenhum outro texto (nem esse
+    // aviso de entrega, nem mais nada) pode vir grudado nele.
+    return `Pedido criado com sucesso! Total: R$ ${totalFmt}.${entregaNote} Código Pix copia-e-cola pra mandar EXATO e SOZINHO pro cliente (sem nenhum texto antes/depois grudado):\n${paid.pix_copia_cola}`
   }
 
   const linkRes = await fetch(`${ECOMMERCE_API_URL}/api/orders/${order.id}/card-link`, { method: 'POST' })
@@ -420,7 +423,9 @@ async function criarPedidoEGerarCobranca(
     return `Pedido criado (total R$ ${totalFmt}), mas o link de cobrança ainda não veio pronto. Avise que um atendente vai mandar o pagamento.`
   }
   const entregaNote = opts.querEntregaOuColeta
-    ? ' Avise também que a entrega/coleta no endereço compartilhado será combinada por um atendente assim que o pagamento for confirmado.'
+    ? ' A entrega/coleta no endereço compartilhado será combinada por um atendente assim que o pagamento for confirmado.'
     : ''
-  return `Pedido criado com sucesso! Total: R$ ${totalFmt}. Link de pagamento por cartão (mande esse link EXATO pro cliente):\n${paid.card_payment_link_url}${entregaNote}`
+  // IMPORTANTE pra IA: o link abaixo vai SOZINHO na segunda parte da mensagem
+  // (depois do marcador de split) — nenhum outro texto grudado nele.
+  return `Pedido criado com sucesso! Total: R$ ${totalFmt}.${entregaNote} Link de pagamento por cartão pra mandar EXATO e SOZINHO pro cliente (sem nenhum texto antes/depois grudado):\n${paid.card_payment_link_url}`
 }
