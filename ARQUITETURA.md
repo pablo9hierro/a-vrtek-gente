@@ -12,7 +12,7 @@ Módulo de vendedor/atendente autônomo via WhatsApp para lojas do Resolutoo (Sa
 - Cliente monta um carrinho misto (produto + serviço) na mesma conversa — o assistente cria um único pedido com os dois.
 - Cliente confirma a prévia, informa nome e email, escolhe Pix — o assistente gera e envia o código Pix copia-e-cola **real**, emitido pela conta Mercado Pago do próprio lojista.
 - Cliente escolhe pagar no cartão — o assistente gera um link de pagamento hospedado real, também via Mercado Pago do tenant.
-- Cliente pede entrega do produto (ou coleta do aparelho pra reparo) — o assistente pede a localização fixa pelo próprio WhatsApp antes de fechar a cobrança.
+- Cliente pede entrega do produto (ou coleta do aparelho pra reparo) — o assistente pede a localização fixa pelo próprio WhatsApp e calcula o valor real da entrega (distância real × preço por km cadastrado pelo lojista) antes de fechar a cobrança — nunca um valor fixo ou chutado.
 - Cliente pergunta se a loja está aberta agora — o assistente responde com o horário real e se está fechada manualmente (feriado, etc).
 - Cliente pergunta o status de um pedido anterior — o assistente consulta pelo telefone da própria conversa e responde com o estado real.
 - Cliente manda 4 mensagens seguidas rapidamente — o assistente espera, junta tudo numa interpretação só, e responde uma única vez (não trava em respostas picadas).
@@ -110,10 +110,11 @@ Cada uma é um adapter fino pra um endpoint público do `ecommerce-api` — o m�
 | `buscar_produtos` | Catálogo real (id, nome, preço, descrição, link público, foto) |
 | `buscar_servicos` | Serviços reais (reparo/manutenção) — preço, categoria, **disponibilidade calculada pelo estoque de peça ligada** |
 | `consultar_horario_funcionamento` | Horário real + status manual (aberto/fechado) |
-| `consultar_localizacao_loja` | Endereço de retirada cadastrado |
+| `consultar_localizacao_loja` | Envia a localização real da loja como **pin nativo do WhatsApp** (lat/lng geocodificados a partir do endereço cadastrado) |
 | `consultar_pedido` | Pedidos recentes do cliente, pelo telefone da própria conversa |
 | `montar_carrinho` | Monta a **prévia** do carrinho (nome + link + foto) — nunca cria pedido nem cobra, só formata pra confirmação do cliente |
-| `criar_pedido_e_gerar_cobranca` | Cria o pedido de verdade (produto e/ou serviço, misto inclusive) e gera Pix ou link de cartão via Mercado Pago do tenant |
+| `calcular_valor_entrega` | Calcula o valor real de entrega/coleta — distância real (rota, não linha reta) entre a localização compartilhada pelo cliente e a da loja, × preço por km cadastrado em `/admin/frete`. Nunca estima, arredonda ou inventa: se a loja não tem localização própria cadastrada, ou o cliente está fora do raio máximo, recusa explicitamente em vez de dar um valor |
+| `criar_pedido_e_gerar_cobranca` | Cria o pedido de verdade (produto e/ou serviço, misto inclusive, com o `valor_entrega` já calculado quando houver) e gera Pix ou link de cartão via Mercado Pago do tenant |
 
 `executeTool(name, input, ctx)` é o único ponto de execução — `ctx` carrega `tenantSlug`, `phone`, `customerName` (nunca credenciais).
 
@@ -130,11 +131,12 @@ Cada uma é um adapter fino pra um endpoint público do `ecommerce-api` — o m�
 
 1. Cliente confirma o que quer comprar → IA chama `montar_carrinho` → manda prévia (nome + link + foto) → **espera confirmação explícita**.
 2. IA pergunta se quer entrega (produto) ou coleta+entrega (serviço de reparo). Se sim, pede pra compartilhar **localização fixa** no próprio WhatsApp (não aceita endereço só em texto).
-3. IA coleta nome completo + email + método de pagamento (pix ou link de cartão).
-4. Só com tudo isso, chama `criar_pedido_e_gerar_cobranca` → cria o pedido (`POST /api/public/catalog/{slug}/assistant-order`) → gera a cobrança:
+3. Assim que a localização chega, a IA chama `calcular_valor_entrega` — nunca estima o valor sozinha. A tool lê `shipping_settings` do tenant (mesma tabela usada por `/loja/admin/frete`: preço por km + raio máximo) e a localização própria da loja (`tenants.pickup_address`, geocodificada em lat/lng), calcula a **rota real** (Google Routes API, com fallback OSRM) entre loja e cliente, e devolve km + preço reais. Fora do raio máximo, ou sem localização da loja cadastrada, a tool recusa explicitamente — nunca devolve um valor aproximado.
+4. IA coleta nome completo + email + método de pagamento (pix ou link de cartão).
+5. Só com tudo isso, chama `criar_pedido_e_gerar_cobranca` (incluindo o `valor_entrega` retornado no passo 3, se houver) → cria o pedido (`POST /api/public/catalog/{slug}/assistant-order`, que soma `shipping_price` ao total e marca `delivery_type='entrega'`) → gera a cobrança:
    - **Pix**: `POST /api/orders/{id}/create-pix-payment?customer_email=...` → Mercado Pago do tenant gera QR/copia-e-cola real, síncrono, na mesma requisição.
    - **Cartão**: pedido nasce com `payment_method='cartao'` → `POST /api/orders/{id}/card-link` → Mercado Pago gera link de pagamento hospedado.
-5. A resposta da tool já contém o código/link real — a IA repassa **literalmente**, nunca reformula (regra universal, evita alucinação de código de pagamento).
+6. A resposta da tool já contém o código/link real — a IA repassa **literalmente**, nunca reformula (regra universal, evita alucinação de código de pagamento). O aviso e o código Pix/link saem como **duas mensagens separadas** no WhatsApp (`MSG_SPLIT_MARKER`), pra o cliente copiar o código limpo.
 
 ## 7. Pagamento — Mercado Pago (OAuth do tenant)
 
@@ -146,6 +148,16 @@ Cada loja conecta sua **própria** conta Mercado Pago (fluxo OAuth padrão, `cli
 ## 8. Localização (entrega/coleta) via WhatsApp
 
 Evolution API entrega mensagens de localização como `locationMessage`/`liveLocationMessage` (lat/lng), tipo de payload diferente de texto normal. O forward Rust (`webhooks.rs::forward_to_assistant_ia`) detecta esse tipo e converte pra um link do Google Maps embutido como texto (`[Cliente compartilhou localização fixa: https://maps.google.com/?q=lat,lng]`), que entra na conversa como qualquer outra mensagem — a IA lê isso no histórico e usa como confirmação de endereço antes de fechar um pedido com entrega/coleta.
+
+### 8.1 Valor real de entrega/coleta (distância × preço por km)
+
+Entrega/coleta **nunca** é um valor fixo ou um serviço cadastrado à parte — é calculado com a mesma lógica de frete usada no checkout normal da vitrine:
+
+- A loja cadastra seu **preço por km** e o **raio máximo de atendimento** em `/loja/admin/frete` (tabela `shipping_settings`).
+- A localização própria da loja (`store_lat`/`store_lng`) vem do mesmo endereço configurado em `/meu-plano/layout` (campo de endereço com autocomplete) — sincronizada automaticamente via `POST /internal/sync-pickup-address`, que geocodifica o endereço (Nominatim/OpenStreetMap) toda vez que o lojista salva.
+- A localização do cliente vem da mensagem de localização fixa compartilhada no WhatsApp (seção 8), convertida de volta em lat/lng pela tool.
+- `POST /api/public/catalog/{slug}/estimate-delivery` calcula a rota real (não linha reta) entre os dois pontos e retorna `{km, price, within_range}`.
+- Sem `store_lat`/`store_lng` cadastrados (loja nunca salvou endereço), o endpoint recusa com erro — nunca cai num valor mockado ou zero disfarçado de real.
 
 ## 9. Debounce, filtro de grupo e gatilho de início
 
@@ -179,5 +191,5 @@ Painel do lojista pra acompanhar (e assumir) qualquer conversa em tempo quase re
 ## 13. O que NÃO está implementado (limites honestos)
 
 - Fila assíncrona (Redis) pra geração de cobrança — **desnecessária**: a chamada ao Mercado Pago é síncrona, o Pix/link volta na mesma requisição, dentro do mesmo turno da conversa.
-- Endereço de entrega estruturado no pedido (rua/número/CEP) — hoje só a localização compartilhada fica registrada na conversa; a logística de entrega/coleta em si é combinada por um atendente humano após o pagamento confirmado.
+- Endereço de entrega estruturado no pedido (rua/número/CEP) — a localização fica registrada como coordenadas (lat/lng) + link de mapa na conversa, usada tanto pro cálculo real de frete (seção 8.1) quanto pra referência do lojista; não existe um formulário de rua/número/complemento — é sempre localização compartilhada via WhatsApp.
 - Debounce distribuído (múltiplas instâncias do serviço) — hoje é em memória, válido pro volume atual; documentado como trabalho futuro se o serviço escalar horizontalmente.
