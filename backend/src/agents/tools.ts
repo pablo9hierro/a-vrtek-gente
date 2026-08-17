@@ -156,6 +156,21 @@ export const tools: Anthropic.Tool[] = [
       required: ['itens', 'nome_cliente', 'email_cliente', 'metodo_pagamento'],
     },
   },
+  {
+    name: 'cancelar_pedido',
+    description:
+      'Cancela DE VERDADE um pedido já criado nesta conversa (identificado pelo id_pedido_interno devolvido por criar_pedido_e_gerar_cobranca). Use quando: (1) o cliente pede pra cancelar um pedido/pagamento que ele mesmo fez, ou (2) o cliente quer MUDAR o carrinho de um pedido que já tem pagamento gerado (adicionar/remover/trocar item) — nesse caso, cancele o pedido antigo com esta ferramenta e IMEDIATAMENTE chame criar_pedido_e_gerar_cobranca de novo com a lista de itens atualizada, reaproveitando nome/email/entrega já informados nesta conversa (confirme com o cliente se ele quer usar os mesmos dados de novo antes de gerar a nova cobrança). Não funciona depois que o pedido já saiu pra entrega/coleta.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id_pedido_interno: {
+          type: 'string',
+          description: 'O id_pedido_interno devolvido por criar_pedido_e_gerar_cobranca nesta mesma conversa — nunca um id inventado ou o número/short_id que aparece pro cliente.',
+        },
+      },
+      required: ['id_pedido_interno'],
+    },
+  },
 ]
 
 type ToolCtx = { tenantSlug: string; phone: string; customerName: string | null; instance: string }
@@ -187,6 +202,7 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
         valorEntrega: typeof input.valor_entrega === 'number' ? input.valor_entrega : null,
       })
     }
+    if (name === 'cancelar_pedido') return await cancelarPedido(ctx.phone, String(input.id_pedido_interno ?? ''))
     return `Ferramenta desconhecida: ${name}`
   } catch (e) {
     return `Erro ao consultar: ${e instanceof Error ? e.message : String(e)}`
@@ -410,8 +426,10 @@ async function criarPedidoEGerarCobranca(
       : ''
     // IMPORTANTE pra IA: o código Pix abaixo vai SOZINHO na segunda parte da
     // mensagem (depois do marcador de split) — nenhum outro texto (nem esse
-    // aviso de entrega, nem mais nada) pode vir grudado nele.
-    return `Pedido criado com sucesso! Total: R$ ${totalFmt}.${entregaNote} Código Pix copia-e-cola pra mandar EXATO e SOZINHO pro cliente (sem nenhum texto antes/depois grudado):\n${paid.pix_copia_cola}`
+    // aviso de entrega, nem mais nada) pode vir grudado nele. id_pedido_interno
+    // NUNCA vai pro cliente — é só pra você (IA) guardar no histórico e usar
+    // depois em cancelar_pedido, se o cliente quiser mudar/cancelar isso.
+    return `Pedido criado com sucesso! Total: R$ ${totalFmt}.${entregaNote} id_pedido_interno=${order.id} (guarde esse id — use em cancelar_pedido se o cliente quiser mudar item ou cancelar depois; NUNCA mencione esse id pro cliente). Código Pix copia-e-cola pra mandar EXATO e SOZINHO pro cliente (sem nenhum texto antes/depois grudado):\n${paid.pix_copia_cola}`
   }
 
   const linkRes = await fetch(`${ECOMMERCE_API_URL}/api/orders/${order.id}/card-link`, { method: 'POST' })
@@ -427,5 +445,31 @@ async function criarPedidoEGerarCobranca(
     : ''
   // IMPORTANTE pra IA: o link abaixo vai SOZINHO na segunda parte da mensagem
   // (depois do marcador de split) — nenhum outro texto grudado nele.
-  return `Pedido criado com sucesso! Total: R$ ${totalFmt}.${entregaNote} Link de pagamento por cartão pra mandar EXATO e SOZINHO pro cliente (sem nenhum texto antes/depois grudado):\n${paid.card_payment_link_url}`
+  return `Pedido criado com sucesso! Total: R$ ${totalFmt}.${entregaNote} id_pedido_interno=${order.id} (guarde esse id — use em cancelar_pedido se o cliente quiser mudar item ou cancelar depois; NUNCA mencione esse id pro cliente). Link de pagamento por cartão pra mandar EXATO e SOZINHO pro cliente (sem nenhum texto antes/depois grudado):\n${paid.card_payment_link_url}`
+}
+
+/**
+ * Cancela um pedido já criado (ownership verificada pelo telefone da
+ * própria conversa, mesmo modelo de confiança de consultar_pedido — sem
+ * JWT). Bloqueado pelo backend depois que o pedido já saiu pra entrega.
+ * Usada tanto pra um cancelamento de verdade quanto como primeiro passo
+ * de uma "edição": cliente muda de ideia sobre o carrinho de um pedido
+ * com pagamento já gerado → cancela o antigo → cria um novo com os itens
+ * certos (ver descrição da tool e universalValidatorRules).
+ */
+async function cancelarPedido(phone: string, idPedidoInterno: string): Promise<string> {
+  const res = await fetch(`${ECOMMERCE_API_URL}/api/orders/${idPedidoInterno}/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ whatsapp: phone }),
+  })
+  if (res.ok) return 'Pedido cancelado com sucesso.'
+  if (res.status === 400) {
+    return 'Não foi possível cancelar — esse pedido já saiu pra entrega/coleta, não dá mais pra cancelar por aqui. Avise que um atendente humano precisa resolver.'
+  }
+  if (res.status === 403 || res.status === 404) {
+    return 'Não encontrei esse pedido pra cancelar (id inválido ou não pertence a esse telefone) — confira o id_pedido_interno guardado no histórico desta conversa.'
+  }
+  const body = await res.text().catch(() => '')
+  return `Não consegui cancelar agora: ${body || res.status}`
 }
