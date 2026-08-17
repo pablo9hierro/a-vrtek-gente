@@ -12,6 +12,16 @@ type ForwardedEvolutionPayload = {
   phone: string
   text: string
   customer_name?: string
+  /**
+   * true = veio do botão "Novo Chat"/caixa de mensagem em /admin/chat
+   * (ecommerce-api::simulate_assistant_ia_message), não do WhatsApp real.
+   * O admin já clicou explicitamente pra simular um cliente — exigir que a
+   * PRIMEIRA mensagem bata um start_keyword configurado (regra pensada pra
+   * filtrar mensagem solta de desconhecido no WhatsApp de verdade) só
+   * deixava "Novo Chat" quebrado sem erro nenhum pra qualquer texto que não
+   * fosse literalmente a palavra configurada.
+   */
+  simulated?: boolean
 }
 
 /**
@@ -56,7 +66,7 @@ type PendingBatch = {
 const pendingBatches = new Map<string, PendingBatch>()
 
 async function handleInbound(payload: ForwardedEvolutionPayload) {
-  const { tenant_slug: tenantSlug, instance, phone, text, customer_name: customerNameRaw } = payload
+  const { tenant_slug: tenantSlug, instance, phone, text, customer_name: customerNameRaw, simulated } = payload
   if (!tenantSlug || !phone || !text) return
   if (!isBetaTenant(tenantSlug)) return // fora do beta, ignora silenciosamente
   const customerName = customerNameRaw ?? null
@@ -75,6 +85,7 @@ async function handleInbound(payload: ForwardedEvolutionPayload) {
     config.window_timeout_minutes,
     text,
     config.start_keywords,
+    Boolean(simulated),
   )
   // Sem conversa aberta e a mensagem não bateu nenhum gatilho de início ->
   // ignora por completo (nunca cria conversa, nunca responde). O
@@ -204,6 +215,7 @@ async function findOrOpenConversation(
   windowTimeoutMinutes: number,
   text: string,
   startKeywords: string[],
+  simulated: boolean,
 ) {
   const existing = await pool.query<{
     id: string
@@ -220,8 +232,11 @@ async function findOrOpenConversation(
 
   // Sem janela aberta -> só inicia atendimento se essa mensagem bater um
   // dos gatilhos de início configurados. Qualquer outra mensagem "do
-  // nada" (sem conversa em curso) é ignorada por completo.
-  const iniciou = (startKeywords ?? []).some((kw) => text.toLowerCase().includes(kw.toLowerCase()))
+  // nada" (sem conversa em curso) é ignorada por completo — EXCETO
+  // mensagem simulada pelo admin ("Novo Chat"), que já é um pedido
+  // explícito de abrir uma conversa de teste, não uma mensagem solta de
+  // desconhecido no WhatsApp real.
+  const iniciou = simulated || (startKeywords ?? []).some((kw) => text.toLowerCase().includes(kw.toLowerCase()))
   if (!iniciou) return null
 
   // Fecha qualquer janela velha que passou do timeout, antes de abrir uma nova.
