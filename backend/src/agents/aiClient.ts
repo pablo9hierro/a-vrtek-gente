@@ -76,12 +76,19 @@ async function completeWithToolsAnthropic(
 
   const toolCalls: ToolCallRecord[] = []
   let finalText = ''
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 6; i++) {
     const res = await client.messages.create({
       model: 'claude-opus-5',
       max_tokens: 1024,
       system,
       tools,
+      // Regra de negócio: toda resposta precisa vir de pelo menos 1 tool
+      // call real — nunca responder "de memória"/genérico sem ter
+      // consultado nada. Só força na 1ª rodada; depois de já ter pelo
+      // menos um resultado de ferramenta, o modelo decide livremente se
+      // precisa de mais alguma (pode encadear quantas quiser) ou já
+      // responder o texto final.
+      ...(i === 0 ? { tool_choice: { type: 'any' as const } } : {}),
       messages,
     })
     if (res.stop_reason !== 'tool_use') {
@@ -159,11 +166,13 @@ async function completeWithToolsOpenAiCompatible(
 
   const toolCalls: ToolCallRecord[] = []
   let finalText = ''
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 6; i++) {
     const res = await openAiCompatibleFetch(config, url, {
       model,
       messages,
       tools: openAiTools,
+      // Mesma regra de negócio do lado Anthropic — ver comentário lá.
+      ...(i === 0 ? { tool_choice: 'required' } : {}),
     })
     const choice = res.choices?.[0]
     const message = choice?.message

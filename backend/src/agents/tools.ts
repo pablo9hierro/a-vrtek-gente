@@ -82,10 +82,15 @@ export const tools: Anthropic.Tool[] = [
   {
     name: 'consultar_pedido',
     description:
-      'Consulta os pedidos recentes do cliente (pelo telefone da própria conversa) na loja de verdade. Use sempre que o cliente perguntar sobre status/andamento de um pedido já feito.',
+      'Consulta os pedidos recentes do cliente na loja de verdade — por padrão usa o telefone da própria conversa. Use sempre que o cliente perguntar sobre status/andamento de um pedido já feito. Se não achar nada pelo telefone da conversa, pergunte se o pedido foi feito com outro número de WhatsApp; se o cliente informar outro número, chame de novo passando outro_telefone. Se o pedido estiver "saiu pra entrega", a resposta já vem com o tempo estimado restante — repasse isso ao cliente.',
     input_schema: {
       type: 'object',
-      properties: {},
+      properties: {
+        outro_telefone: {
+          type: 'string',
+          description: 'Só preencha se o cliente confirmar que o pedido foi feito com um número de WhatsApp diferente do desta conversa.',
+        },
+      },
     },
   },
   {
@@ -182,7 +187,8 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
     if (name === 'consultar_horario_funcionamento') return await consultarHorario(ctx.tenantSlug)
     if (name === 'consultar_localizacao_loja') return await consultarLocalizacao(ctx)
     if (name === 'calcular_valor_entrega') return await calcularValorEntrega(ctx.tenantSlug, String(input.localizacao_compartilhada ?? ''))
-    if (name === 'consultar_pedido') return await consultarPedido(ctx.tenantSlug, ctx.phone)
+    if (name === 'consultar_pedido')
+      return await consultarPedido(ctx.tenantSlug, ctx.phone, input.outro_telefone ? String(input.outro_telefone) : undefined)
     if (name === 'montar_carrinho') {
       const itens = Array.isArray(input.itens)
         ? (input.itens as { tipo: 'produto' | 'servico'; id?: string; nome: string; quantidade: number }[])
@@ -320,17 +326,51 @@ async function calcularValorEntrega(tenantSlug: string, localizacaoCompartilhada
     const body = await res.text().catch(() => '')
     return `Não consegui calcular o valor da entrega agora: ${body || res.status}`
   }
-  const data = (await res.json()) as { km: number; price: number; within_range: boolean }
+  const data = (await res.json()) as { km: number; price: number; within_range: boolean; eta_minutes: number }
   const priceFmt = data.price.toFixed(2).replace('.', ',')
   const kmFmt = data.km.toFixed(1).replace('.', ',')
   if (!data.within_range) {
     return `O endereço fica a ${kmFmt} km da loja, fora da área de entrega. Avise o cliente que essa entrega não é possível — só retirada no local.`
   }
-  return `Valor real da entrega/coleta: R$ ${priceFmt} (${kmFmt} km até a loja, calculado pelo preço por km cadastrado na loja).`
+  return `Valor real da entrega/coleta: R$ ${priceFmt} (${kmFmt} km até a loja, tempo estimado de trajeto ${data.eta_minutes} min, calculado pelo preço por km cadastrado na loja).`
 }
 
-async function consultarPedido(tenantSlug: string, phone: string): Promise<string> {
-  const res = await fetch(`${ECOMMERCE_API_URL}/api/public/catalog/${tenantSlug}/orders-by-phone/${phone}`)
+/** Minutos entre um timestamp ISO passado e agora — nunca negativo. */
+function minutesSince(isoTimestamp: string): number {
+  const then = new Date(isoTimestamp).getTime()
+  if (!Number.isFinite(then)) return 0
+  return Math.max(0, Math.round((Date.now() - then) / 60000))
+}
+
+/**
+ * Pra pedido em rota de entrega com localização do cliente já salva,
+ * recalcula a rota real (mesmo endpoint de calcular_valor_entrega) e
+ * subtrai o tempo já passado desde a última mudança de status — dá o
+ * "faltam X minutos" real que o cliente quer saber, nunca chutado. Sem
+ * coluna dedicada de "despachado em", `updated_at` é a melhor referência
+ * real disponível (a última mudança de status quase sempre É o despacho,
+ * pra pedido que está em em_rota_de_entrega agora).
+ */
+async function estimateRemainingMinutes(
+  tenantSlug: string,
+  lat: number,
+  lng: number,
+  dispatchedAtIso: string,
+): Promise<number | null> {
+  const res = await fetch(`${ECOMMERCE_API_URL}/api/public/catalog/${tenantSlug}/estimate-delivery`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ lat, lng }),
+  })
+  if (!res.ok) return null
+  const data = (await res.json()) as { eta_minutes: number }
+  const elapsed = minutesSince(dispatchedAtIso)
+  return Math.max(0, data.eta_minutes - elapsed)
+}
+
+async function consultarPedido(tenantSlug: string, phone: string, outroTelefone?: string): Promise<string> {
+  const phoneToUse = outroTelefone?.trim() || phone
+  const res = await fetch(`${ECOMMERCE_API_URL}/api/public/catalog/${tenantSlug}/orders-by-phone/${phoneToUse}`)
   if (!res.ok) return 'Não foi possível consultar pedidos agora.'
   const orders = (await res.json()) as {
     short_id: string
@@ -340,14 +380,30 @@ async function consultarPedido(tenantSlug: string, phone: string): Promise<strin
     delivery_type: string
     total: number
     created_at: string
+    updated_at: string
+    customer_lat: number | null
+    customer_lng: number | null
   }[]
-  if (orders.length === 0) return 'Não encontrei nenhum pedido desse telefone nessa loja.'
-  return orders
-    .map(
-      (o) =>
-        `Pedido #${o.short_id} — status: ${o.status}, pagamento: ${o.payment_status} (${o.payment_method}), ${o.delivery_type}, total R$ ${o.total.toFixed(2).replace('.', ',')}, feito em ${o.created_at}`,
-    )
-    .join('\n')
+  if (orders.length === 0) {
+    return outroTelefone
+      ? `Não encontrei nenhum pedido pro número ${outroTelefone} nessa loja.`
+      : 'Não encontrei nenhum pedido desse telefone (o número desta conversa) nessa loja — pergunte ao cliente se o pedido foi feito com outro número de WhatsApp; se ele confirmar outro número, chame esta ferramenta de novo passando outro_telefone.'
+  }
+  const linhas: string[] = []
+  for (const o of orders) {
+    let linha = `Pedido #${o.short_id} — status: ${o.status}, pagamento: ${o.payment_status} (${o.payment_method}), ${o.delivery_type}, total R$ ${o.total.toFixed(2).replace('.', ',')}, feito em ${o.created_at}`
+    if (o.status === 'em_rota_de_entrega' && o.customer_lat != null && o.customer_lng != null) {
+      const restante = await estimateRemainingMinutes(tenantSlug, o.customer_lat, o.customer_lng, o.updated_at)
+      linha +=
+        restante == null
+          ? ' — saiu pra entrega, não consegui recalcular o tempo restante agora'
+          : restante === 0
+            ? ' — saiu pra entrega, deve chegar a qualquer momento'
+            : ` — saiu pra entrega, faltam aproximadamente ${restante} minuto${restante === 1 ? '' : 's'} pra chegar`
+    }
+    linhas.push(linha)
+  }
+  return linhas.join('\n')
 }
 
 function montarCarrinho(
