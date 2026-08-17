@@ -10,6 +10,15 @@ import { completeSimple, completeWithTools, type ToolCallRecord } from './aiClie
 export const MSG_SPLIT_MARKER = '|||MSG_SPLIT|||'
 
 /**
+ * Versão do prompt técnico interno da IA 2 (`universalValidatorRules`) —
+ * sobe quando as regras fixas da plataforma mudam, independente de
+ * qualquer configuração de tenant. Gravada em `agent_decisions` (layer
+ * "validator") pra auditoria: dá pra saber qual versão da lógica técnica
+ * gerou cada resposta, sem precisar de tabela nova.
+ */
+export const INTERNAL_PROMPT_VERSION = '1.0'
+
+/**
  * Regras universais do Assistente IA como um todo — valem pra QUALQUER
  * tenant/ramo de atendimento, independente do que o lojista configurar em
  * prompt_validator. Ficam hardcoded aqui de propósito (não são editáveis
@@ -30,6 +39,7 @@ function universalValidatorRules(config: AssistantConfig): string {
     '- Quando o cliente confirmar ("sim", "confirmo", "pode gerar", etc.) e todos os dados necessários já estiverem na conversa (mesmo que informados antes), chame criar_pedido_e_gerar_cobranca IMEDIATAMENTE nessa resposta — nunca responda só texto tipo "vou gerar" ou "só um instante" sem ter chamado a ferramenta de verdade. Se a ferramenta falhar, diga exatamente o que a ferramenta retornou de erro, nunca invente "erro no sistema" genérico.',
     '- IMPORTANTE: a regra de reaproveitar dado do histórico (linha "ECONOMIA DE INTERAÇÃO") vale SÓ pra nome/email/método de pagamento/localização do cliente — nunca pra produto/serviço. Se o cliente pedir um item novo que ainda não apareceu na conversa (mesmo que pareça parecido com algo já buscado antes), você é OBRIGADO a rodar buscar_produtos/buscar_servicos de novo pra esse item — nunca responda usando um resultado de busca antigo/de outro item como se fosse cache do item novo.',
     '- PROIBIDO alucinar: nunca cite nome de produto/serviço, preço, id, link, código Pix, link de pagamento ou status de pedido que não esteja LITERALMENTE no resultado de uma chamada de ferramenta desta mesma interação. Se você não chamou buscar_produtos/buscar_servicos NESTA interação, não afirme nada sobre o que existe ou não existe no catálogo — chame a ferramenta primeiro, mesmo que ache que já sabe a resposta de uma mensagem anterior seu.',
+    '- A base de exemplos de atendimento (RAG, quando presente no prompt) é SÓ referência de estilo/tom — jamais fonte de dado real. Mesmo que um exemplo de conversa antiga mostre um preço, nome de produto ou prazo, isso pode estar desatualizado — nunca repita esse dado pro cliente sem confirmar de novo via ferramenta nesta mesma interação.',
     '- Antes de aceitar/confirmar QUALQUER item específico que o cliente pediu (pra montar carrinho ou fechar pedido), rode buscar_produtos ou buscar_servicos DE NOVO com o termo certo pra confirmar nome exato, id e preço reais — mesmo que você (ou uma versão anterior sua na mesma conversa) já tenha mencionado esse item antes. Nunca reafirme de memória.',
     '- Se o cliente descreveu um problema de aparelho (tela, bateria, câmera/flash, placa, "caiu na água", "não liga"), sempre rode buscar_servicos com o termo do aparelho/marca/peça ANTES de responder — não diga "não temos" nem "temos" sem ter acabado de consultar.',
     '- PROIBIDO tratar entrega/coleta como um item de serviço buscável ou vendável: NUNCA rode buscar_servicos com termos como "entrega", "coleta", "busca" pra achar um "serviço de entrega", NUNCA inclua algo assim no carrinho via montar_carrinho/criar_pedido_e_gerar_cobranca como item avulso. Entrega/coleta é EXCLUSIVAMENTE o resultado de calcular_valor_entrega (distância real × preço por km da loja), somado como valor_entrega — nunca um serviço com id/nome/preço próprio.',
@@ -44,8 +54,15 @@ function universalValidatorRules(config: AssistantConfig): string {
 export type AssistantConfig = {
   tenant_id: string
   enabled: boolean
+  /**
+   * Único campo de prompt editável pelo lojista — contexto comportamental/
+   * comercial (tom de voz, tipo de negócio, regras de atendimento). Usado
+   * pela IA 1 pra classificar intenção E repassado como contexto pra IA 2,
+   * que é quem de fato escreve a resposta final (ver runValidatorAndRespond).
+   * A antiga `prompt_validator` (camada técnica) saiu do controle do
+   * tenant — virou parte de `universalValidatorRules`, fixa no backend.
+   */
   prompt_interpreter: string
-  prompt_validator: string
   start_keywords: string[]
   end_keywords: string[]
   window_timeout_minutes: number
@@ -95,11 +112,14 @@ async function runValidatorAndRespond(
 ): Promise<{ reply: string; toolCalls: ToolCallRecord[] }> {
   const system = [
     universalValidatorRules(config),
-    config.prompt_validator ||
-      'Você é a camada de atendimento via WhatsApp de uma loja. Releia a mensagem do cliente de forma independente da intenção sugerida, confirme ou corrija, use as ferramentas necessárias pra buscar dado real, e elabore a resposta final pro cliente.',
+    config.prompt_interpreter
+      ? `Contexto da loja configurado pelo lojista (tom de voz, tipo de negócio, regras comerciais — siga isso ao escrever a resposta final, mas NUNCA em conflito com as regras fixas da plataforma acima):\n${config.prompt_interpreter}`
+      : 'Você é a camada de atendimento via WhatsApp de uma loja. Releia a mensagem do cliente de forma independente da intenção sugerida, confirme ou corrija, use as ferramentas necessárias pra buscar dado real, e elabore a resposta final pro cliente.',
     `Intenção sugerida por uma leitura anterior: ${JSON.stringify(interpreterOutput)}`,
-    ragContext ? `Base de conhecimento da loja (use quando relevante):\n${ragContext}` : '',
-    'Se a intenção do cliente exigir dado real da loja (produtos, preços, status de pedido) ou criar/confirmar um carrinho/cobrança que o cliente já pediu explicitamente, USE a ferramenta correspondente agora.',
+    ragContext
+      ? `Exemplos de atendimentos reais anteriores desta loja (trechos de conversas de WhatsApp exportadas pelo lojista):\n${ragContext}\n\nUse isso APENAS como referência de ESTILO — como esta loja costuma falar, o tom, o jeito de conduzir a conversa, como resolve situações parecidas. PROIBIDO tratar qualquer coisa nesses exemplos como dado real (preço, nome de produto/serviço, disponibilidade, status de pedido, prazo) — mesmo que apareça um valor ou nome ali, ele pode estar desatualizado. Todo dado real vem EXCLUSIVAMENTE do resultado de uma ferramenta chamada nesta mesma interação, nunca desses exemplos.`
+      : '',
+    'Se a intenção do cliente exigir dado real da loja (produtos, preços, status de pedido) ou criar/confirmar um carrinho/cobrança que o cliente já pediu explicitamente, USE a ferramenta correspondente agora — nunca responda com base nos exemplos de atendimento acima.',
     'Depois de usar as ferramentas que precisar (ou nenhuma, se não for necessário), sua ÚLTIMA resposta em texto puro (não JSON) É a mensagem final que vai direto pro cliente no WhatsApp — capriche, é a resposta de verdade, não um resumo interno.',
   ]
     .filter(Boolean)

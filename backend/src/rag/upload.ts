@@ -2,6 +2,7 @@ import { Router } from 'express'
 import multer from 'multer'
 import { pool } from '../db/pool.js'
 import { isBetaTenant } from '../services/beta.js'
+import { internalAuthGate } from '../services/internalAuth.js'
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } })
 
@@ -14,6 +15,8 @@ function betaGate(req: any, res: any, next: any) {
   }
   next()
 }
+
+ragRouter.use('/:tenantSlug/rag', internalAuthGate)
 
 ragRouter.get('/:tenantSlug/rag/documents', betaGate, async (req, res) => {
   const { rows } = await pool.query(

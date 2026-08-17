@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { pool } from '../db/pool.js'
 import { isBetaTenant } from '../services/beta.js'
+import { internalAuthGate } from '../services/internalAuth.js'
 
 export const conversationsRouter = Router()
 
@@ -11,6 +12,8 @@ function betaGate(req: any, res: any, next: any) {
   }
   next()
 }
+
+conversationsRouter.use('/:tenantSlug/conversations', internalAuthGate)
 
 conversationsRouter.get('/:tenantSlug/conversations', betaGate, async (req, res) => {
   const { rows } = await pool.query(

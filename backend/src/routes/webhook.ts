@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { pool } from '../db/pool.js'
 import { isBetaTenant } from '../services/beta.js'
-import { runPipeline, MSG_SPLIT_MARKER, type AssistantConfig } from '../agents/pipeline.js'
+import { runPipeline, MSG_SPLIT_MARKER, INTERNAL_PROMPT_VERSION, type AssistantConfig } from '../agents/pipeline.js'
 import { sendWhatsappMessage } from '../evolution-adapter/send.js'
 
 export const webhookRouter = Router()
@@ -180,7 +180,12 @@ async function processBatch(conversationId: string, config: AssistantConfig) {
     await pool.query(
       `INSERT INTO assistant_ia.agent_decisions (message_id, tenant_id, layer, output) VALUES
          ($1, $2, 'interpreter', $3), ($1, $2, 'validator', $4)`,
-      [outboundMessage.rows[0].id, batch.tenantSlug, result.interpreterOutput, { tool_calls: result.toolCalls }],
+      [
+        outboundMessage.rows[0].id,
+        batch.tenantSlug,
+        result.interpreterOutput,
+        { tool_calls: result.toolCalls, internal_prompt_version: INTERNAL_PROMPT_VERSION },
+      ],
     )
     await pool.query(`UPDATE assistant_ia.conversations SET last_message_at = now() WHERE id = $1`, [conversationId])
 

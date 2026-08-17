@@ -1,6 +1,7 @@
 import { Router } from 'express'
 import { pool } from '../db/pool.js'
 import { isBetaTenant } from '../services/beta.js'
+import { internalAuthGate } from '../services/internalAuth.js'
 import type { AssistantConfig } from '../agents/pipeline.js'
 
 export const configRouter = Router()
@@ -14,10 +15,20 @@ function betaGate(req: any, res: any, next: any) {
   next()
 }
 
+configRouter.use('/:tenantSlug/config', internalAuthGate)
+
+// prompt_validator saiu do controle do tenant (virou parte fixa de
+// universalValidatorRules, ver pipeline.ts) — nunca mais lido nem escrito
+// aqui, mesmo que a coluna ainda exista no banco com dado antigo. Lista
+// explícita de colunas (não SELECT *) garante que o campo nunca volta a
+// vazar pra resposta por acidente, ex: se alguém reintroduzir SELECT *.
+const CONFIG_COLUMNS = `tenant_id, enabled, prompt_interpreter, start_keywords, end_keywords, window_timeout_minutes,
+  message_batch_window_seconds, min_response_chars, max_response_chars, anthropic_api_key, ai_provider, ai_model, updated_at`
+
 configRouter.get('/:tenantSlug/config', betaGate, async (req, res) => {
   const tenantSlug = req.params.tenantSlug
   const { rows } = await pool.query<AssistantConfig>(
-    `SELECT * FROM assistant_ia.assistant_config WHERE tenant_id = $1`,
+    `SELECT ${CONFIG_COLUMNS} FROM assistant_ia.assistant_config WHERE tenant_id = $1`,
     [tenantSlug],
   )
   if (rows.length === 0) {
@@ -25,7 +36,6 @@ configRouter.get('/:tenantSlug/config', betaGate, async (req, res) => {
       tenant_id: tenantSlug,
       enabled: false,
       prompt_interpreter: '',
-      prompt_validator: '',
       start_keywords: ['oi', 'olá', 'atendimento', 'quero comprar', 'pedido'],
       end_keywords: ['tchau', 'encerrar'],
       window_timeout_minutes: 30,
@@ -44,15 +54,16 @@ configRouter.get('/:tenantSlug/config', betaGate, async (req, res) => {
 configRouter.put('/:tenantSlug/config', betaGate, async (req, res) => {
   const tenantSlug = req.params.tenantSlug
   const body = req.body as Partial<AssistantConfig>
+  // prompt_validator nunca é lido do body, mesmo que o cliente mande —
+  // não é mais um campo que o tenant controla (ver pipeline.ts).
   const { rows } = await pool.query<AssistantConfig>(
     `INSERT INTO assistant_ia.assistant_config
-       (tenant_id, enabled, prompt_interpreter, prompt_validator, start_keywords, end_keywords, window_timeout_minutes,
+       (tenant_id, enabled, prompt_interpreter, start_keywords, end_keywords, window_timeout_minutes,
         message_batch_window_seconds, min_response_chars, max_response_chars, anthropic_api_key, ai_provider, ai_model, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
      ON CONFLICT (tenant_id) DO UPDATE SET
        enabled = EXCLUDED.enabled,
        prompt_interpreter = EXCLUDED.prompt_interpreter,
-       prompt_validator = EXCLUDED.prompt_validator,
        start_keywords = EXCLUDED.start_keywords,
        end_keywords = EXCLUDED.end_keywords,
        window_timeout_minutes = EXCLUDED.window_timeout_minutes,
@@ -63,12 +74,11 @@ configRouter.put('/:tenantSlug/config', betaGate, async (req, res) => {
        ai_provider = EXCLUDED.ai_provider,
        ai_model = EXCLUDED.ai_model,
        updated_at = now()
-     RETURNING *`,
+     RETURNING ${CONFIG_COLUMNS}`,
     [
       tenantSlug,
       body.enabled ?? false,
       body.prompt_interpreter ?? '',
-      body.prompt_validator ?? '',
       body.start_keywords ?? ['oi', 'olá', 'atendimento', 'quero comprar', 'pedido'],
       body.end_keywords ?? ['tchau', 'encerrar'],
       body.window_timeout_minutes ?? 30,
