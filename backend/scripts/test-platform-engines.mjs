@@ -44,7 +44,12 @@ async function testEngine(engine) {
       body: JSON.stringify({
         model: engine.model,
         messages: [{ role: 'user', content: 'Responda apenas a palavra: OK' }],
-        max_tokens: 10,
+        // Alguns modelos (ex: Gemini com reasoning) gastam token budget em
+        // "pensamento" interno antes do texto visível — max_tokens baixo
+        // demais corta antes de qualquer conteúdo aparecer (finish_reason
+        // "length" com content vazio, falso negativo). 300 dá folga real
+        // sem descaracterizar o teste (produção não limita max_tokens).
+        max_tokens: 300,
       }),
     })
     const ms = Date.now() - started
