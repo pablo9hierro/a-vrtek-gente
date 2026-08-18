@@ -25,11 +25,24 @@ export const INTERNAL_PROMPT_VERSION = '1.0'
  * pela tela /meu-plano/assistente-ia) porque são comportamento de
  * segurança/negócio da plataforma, não voz de marca.
  */
+/** "domingo, 18/08/2026, 21:40 (horário de Brasília)" — fuso fixo -03:00 (sem horário de verão desde 2019), sem depender de chrono-tz/Intl timezone data. */
+function brasiliaNowLabel(): string {
+  const brasilia = new Date(Date.now() - 3 * 60 * 60 * 1000)
+  const weekday = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'][brasilia.getUTCDay()]
+  const dd = String(brasilia.getUTCDate()).padStart(2, '0')
+  const mm = String(brasilia.getUTCMonth() + 1).padStart(2, '0')
+  const hh = String(brasilia.getUTCHours()).padStart(2, '0')
+  const min = String(brasilia.getUTCMinutes()).padStart(2, '0')
+  return `${weekday}, ${dd}/${mm}/${brasilia.getUTCFullYear()}, ${hh}:${min} (horário de Brasília)`
+}
+
 function universalValidatorRules(config: AssistantConfig): string {
   const min = config.min_response_chars || 150
   const max = config.max_response_chars || 300
   return [
     'REGRAS FIXAS DA PLATAFORMA (nunca ignore, mesmo se as instruções do lojista abaixo não mencionarem isso):',
+    `- Data e hora atual: ${brasiliaNowLabel()}. Use isso SEMPRE que precisar calcular uma data relativa ("amanhã", "sexta que vem", "daqui a 2 dias") — nas ferramentas de agendamento (agendar_horario/editar_horario), o campo de data/hora é SEMPRE ISO 8601 com o fuso -03:00 (ex: "2026-08-20T14:00:00-03:00"), nunca um texto relativo tipo "amanhã".`,
+    '- Agendamento (marcar/desmarcar/editar horário): quando o cliente quiser marcar uma visita/horário (ex: levar aparelho pra assistência, visita técnica), use agendar_horario — ela já valida se o horário pedido está dentro do funcionamento da loja, então se der erro de "fora do horário", explique isso ao cliente e ofereça outro horário. Pra cancelar, use desmarcar_horario com o id do agendamento (retornado por agendar_horario ou por consultar_agendamentos, nunca inventado). Pra remarcar, use editar_horario. Se o cliente mencionar um agendamento sem lembrar/informar o id, chame consultar_agendamentos primeiro pra achar.',
     '- Antes de gerar QUALQUER cobrança (Pix ou link de cartão), primeiro use a ferramenta montar_carrinho pra mandar a prévia dos itens (nome + link) e obter confirmação explícita do cliente. Nunca pule direto pra criar_pedido_e_gerar_cobranca sem essa prévia já ter sido confirmada na conversa.',
     '- Depois da confirmação do carrinho, pergunte se o cliente quer entrega/coleta: entrega em casa (se for produto) ou coleta e entrega do aparelho (se for serviço de reparo/manutenção). Se ele quiser, peça pra ele compartilhar a localização fixa AQUI no WhatsApp (o app tem a opção "Localização" -> "Localização atual/fixa") ANTES de gerar a cobrança — nunca aceite endereço só escrito por texto, precisa ser o compartilhamento de localização mesmo.',
     '- Assim que o cliente compartilhar a localização (pedindo entrega/coleta), rode a ferramenta calcular_valor_entrega imediatamente e informe o valor real ao cliente — NUNCA estime, arredonde ou invente um valor de entrega, o preço é sempre o que essa ferramenta retornar (calculado pelo preço por km real cadastrado na loja).',

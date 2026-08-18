@@ -186,6 +186,59 @@ export const tools: ToolDefinition[] = [
       required: ['id_pedido_interno'],
     },
   },
+  {
+    name: 'agendar_horario',
+    description:
+      'Marca um horário/visita real na loja (ex: levar o aparelho pra assistência, visita técnica) — já valida se cai dentro do horário de funcionamento cadastrado, rejeitando com erro claro se não. Use quando o cliente quiser marcar/agendar algo. Guarde o id do agendamento retornado (nunca mencione esse id pro cliente) — precisa dele pra desmarcar/editar depois.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        data_hora: {
+          type: 'string',
+          description: 'Data/hora desejada em ISO 8601 com o fuso -03:00, ex: "2026-08-20T14:00:00-03:00" — calcule a data absoluta a partir da data/hora atual informada nas regras fixas, nunca mande texto relativo.',
+        },
+        motivo: {
+          type: 'string',
+          description: 'Breve descrição do motivo (ex: "levar iPhone 13 com tela quebrada pra avaliação").',
+        },
+      },
+      required: ['data_hora', 'motivo'],
+    },
+  },
+  {
+    name: 'desmarcar_horario',
+    description: 'Cancela DE VERDADE um agendamento existente. Use o id retornado por agendar_horario ou consultar_agendamentos nesta mesma conversa — nunca um id inventado.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id_agendamento: { type: 'string', description: 'id do agendamento a cancelar.' },
+      },
+      required: ['id_agendamento'],
+    },
+  },
+  {
+    name: 'editar_horario',
+    description: 'Remarca um agendamento existente pra uma nova data/hora — já valida se a nova data cai dentro do horário de funcionamento. Use o id retornado por agendar_horario ou consultar_agendamentos.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id_agendamento: { type: 'string', description: 'id do agendamento a remarcar.' },
+        nova_data_hora: {
+          type: 'string',
+          description: 'Nova data/hora em ISO 8601 com o fuso -03:00, mesmo formato de agendar_horario.',
+        },
+      },
+      required: ['id_agendamento', 'nova_data_hora'],
+    },
+  },
+  {
+    name: 'consultar_agendamentos',
+    description: 'Lista os agendamentos ativos do cliente (telefone da própria conversa). Use pra achar o id de um agendamento que o cliente mencionou sem lembrar o id, antes de chamar desmarcar_horario/editar_horario.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
 ]
 
 type ToolCtx = { tenantSlug: string; phone: string; customerName: string | null; instance: string }
@@ -219,6 +272,12 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
       })
     }
     if (name === 'cancelar_pedido') return await cancelarPedido(ctx.phone, String(input.id_pedido_interno ?? ''))
+    if (name === 'agendar_horario')
+      return await agendarHorario(ctx, String(input.data_hora ?? ''), String(input.motivo ?? ''))
+    if (name === 'desmarcar_horario') return await desmarcarHorario(ctx.tenantSlug, String(input.id_agendamento ?? ''))
+    if (name === 'editar_horario')
+      return await editarHorario(ctx.tenantSlug, String(input.id_agendamento ?? ''), String(input.nova_data_hora ?? ''))
+    if (name === 'consultar_agendamentos') return await consultarAgendamentos(ctx.tenantSlug, ctx.phone)
     return `Ferramenta desconhecida: ${name}`
   } catch (e) {
     return `Erro ao consultar: ${e instanceof Error ? e.message : String(e)}`
@@ -538,4 +597,56 @@ async function cancelarPedido(phone: string, idPedidoInterno: string): Promise<s
   }
   const body = await res.text().catch(() => '')
   return `Não consegui cancelar agora: ${body || res.status}`
+}
+
+async function apiErrorMessage(res: Response): Promise<string> {
+  const body = (await res.json().catch(() => null)) as { error?: string } | null
+  return body?.error || `erro ${res.status}`
+}
+
+function formatAgendamento(a: { id: string; scheduled_at: string; reason: string }): string {
+  const brasilia = new Date(new Date(a.scheduled_at).getTime() - 3 * 60 * 60 * 1000)
+  const dd = String(brasilia.getUTCDate()).padStart(2, '0')
+  const mm = String(brasilia.getUTCMonth() + 1).padStart(2, '0')
+  const hh = String(brasilia.getUTCHours()).padStart(2, '0')
+  const min = String(brasilia.getUTCMinutes()).padStart(2, '0')
+  return `id=${a.id} | ${dd}/${mm} às ${hh}:${min} | ${a.reason}`
+}
+
+async function agendarHorario(ctx: ToolCtx, dataHora: string, motivo: string): Promise<string> {
+  const res = await fetch(`${ECOMMERCE_API_URL}/api/public/catalog/${ctx.tenantSlug}/appointments`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ customer_phone: ctx.phone, customer_name: ctx.customerName, scheduled_at: dataHora, reason: motivo }),
+  })
+  if (!res.ok) return `Não consegui agendar: ${await apiErrorMessage(res)}`
+  const created = (await res.json()) as { id: string; scheduled_at: string; reason: string }
+  return `Agendado com sucesso — ${formatAgendamento(created)} (guarde esse id — use em desmarcar_horario/editar_horario — NUNCA mencione esse id pro cliente).`
+}
+
+async function desmarcarHorario(tenantSlug: string, idAgendamento: string): Promise<string> {
+  const res = await fetch(`${ECOMMERCE_API_URL}/api/public/catalog/${tenantSlug}/appointments/${idAgendamento}/cancel`, {
+    method: 'POST',
+  })
+  if (res.status === 204) return 'Agendamento cancelado com sucesso.'
+  return `Não consegui cancelar o agendamento: ${await apiErrorMessage(res)}`
+}
+
+async function editarHorario(tenantSlug: string, idAgendamento: string, novaDataHora: string): Promise<string> {
+  const res = await fetch(`${ECOMMERCE_API_URL}/api/public/catalog/${tenantSlug}/appointments/${idAgendamento}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ scheduled_at: novaDataHora }),
+  })
+  if (!res.ok) return `Não consegui remarcar: ${await apiErrorMessage(res)}`
+  const updated = (await res.json()) as { id: string; scheduled_at: string; reason: string }
+  return `Remarcado com sucesso — ${formatAgendamento(updated)}.`
+}
+
+async function consultarAgendamentos(tenantSlug: string, phone: string): Promise<string> {
+  const res = await fetch(`${ECOMMERCE_API_URL}/api/public/catalog/${tenantSlug}/appointments/by-phone/${phone}`)
+  if (!res.ok) return 'Não foi possível consultar os agendamentos agora.'
+  const list = (await res.json()) as { id: string; scheduled_at: string; reason: string }[]
+  if (list.length === 0) return 'Esse telefone não tem nenhum agendamento ativo.'
+  return list.map(formatAgendamento).join('\n')
 }
