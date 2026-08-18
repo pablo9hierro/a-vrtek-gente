@@ -4,6 +4,7 @@ import cors from 'cors'
 import { configRouter } from './routes/config.js'
 import { conversationsRouter } from './routes/conversations.js'
 import { webhookRouter } from './routes/webhook.js'
+import { platformAiEnginesRouter } from './routes/platformAiEngines.js'
 import { ragRouter } from './rag/upload.js'
 import { runMigrations } from './db/migrate.js'
 
@@ -15,13 +16,17 @@ app.use(
     origin: ['https://resolutoo.com', 'http://localhost:5173', 'http://localhost:5174'],
   }),
 )
-app.use(express.json({ limit: '2mb' }))
+// 15mb (não 2mb) — mensagem de voz do WhatsApp forwardada como base64 pelo
+// ecommerce-api (audio_base64, ver webhook.ts) pode passar de 2mb em notas
+// de voz mais longas; base64 ainda soma ~33% sobre o tamanho original.
+app.use(express.json({ limit: '15mb' }))
 
 app.get('/health', (_req, res) => res.json({ ok: true }))
 
 app.use('/api/tenants', configRouter)
 app.use('/api/tenants', conversationsRouter)
 app.use('/api/tenants', ragRouter)
+app.use('/api/platform', platformAiEnginesRouter)
 app.use('/webhook', webhookRouter)
 
 const port = Number(process.env.PORT) || 8090

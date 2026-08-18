@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { tools, executeTool } from './tools.js'
 import type { AssistantConfig } from './pipeline.js'
+import { getEnabledPlatformEngines, type PlatformEngine } from './platformEngines.js'
 
 const defaultAnthropic = new Anthropic() // lê ANTHROPIC_API_KEY do ambiente
 
@@ -9,10 +10,24 @@ export type ChatMessage = { role: 'user' | 'assistant'; content: string }
 export type ToolCtx = { tenantSlug: string; phone: string; customerName: string | null; instance: string }
 
 /**
- * Chama a IA e resolve tool calling — abstrai o provedor (Anthropic,
- * OpenAI ou OpenRouter) por trás de uma única assinatura, pra
- * `pipeline.ts` nunca precisar saber qual dos três está em uso. `history`
- * é a conversa (sem incluir `userMessage`, que entra à parte).
+ * Chave de PLATAFORMA pro provedor do motor — nunca a chave própria do
+ * tenant (essa seleção de motor é 100% controlada pelo superadmin, ver
+ * platformEngines.ts). Anthropic não precisa disso (usa `defaultAnthropic`
+ * direto, que já lê ANTHROPIC_API_KEY do ambiente).
+ */
+function platformKeyFor(engine: PlatformEngine): string | undefined {
+  if (engine.provider === 'openai') return process.env.OPENAI_API_KEY?.trim() || undefined
+  if (engine.provider === 'openrouter') return process.env.OPENROUTER_API_KEY?.trim() || undefined
+  return undefined
+}
+
+/**
+ * Chama a IA e resolve tool calling, cascateando pela lista de motores da
+ * plataforma (ranking definido pelo superadmin) até um responder com
+ * sucesso — se o motor de topo cair/não responder, tenta o próximo
+ * automaticamente, sem o cliente perceber. `config` continua recebido
+ * (prompt/regras do tenant já estão embutidos em `system`) mas não decide
+ * mais QUAL motor é usado — isso agora é 100% platformEngines.ts.
  */
 export async function completeWithTools(
   config: AssistantConfig,
@@ -21,64 +36,88 @@ export async function completeWithTools(
   userMessage: string,
   toolCtx: ToolCtx,
 ): Promise<{ reply: string; toolCalls: ToolCallRecord[] }> {
-  if (config.ai_provider === 'openrouter') {
-    return completeWithToolsOpenAiCompatible(config, OPENROUTER_URL, 'anthropic/claude-3.5-sonnet', system, history, userMessage, toolCtx)
+  const engines = await getEnabledPlatformEngines()
+  if (engines.length === 0) throw new Error('nenhum motor de IA da plataforma habilitado (ver painel superadmin)')
+
+  let lastErr: unknown
+  for (const engine of engines) {
+    try {
+      return await runWithTools(engine, system, history, userMessage, toolCtx)
+    } catch (err) {
+      lastErr = err
+      console.warn(`[ai-fallback] motor "${engine.label}" falhou, tentando o próximo do ranking:`, err)
+    }
   }
-  if (config.ai_provider === 'openai') {
-    return completeWithToolsOpenAiCompatible(config, OPENAI_URL, 'gpt-4o-mini', system, history, userMessage, toolCtx)
-  }
-  return completeWithToolsAnthropic(config, system, history, userMessage, toolCtx)
+  throw lastErr instanceof Error ? lastErr : new Error('todos os motores de IA da plataforma falharam')
 }
 
-/** Sem ferramentas — usado só pela IA 1 (interpretação de intenção). */
+/** Sem ferramentas — usado só pela IA 1 (interpretação de intenção). Mesmo ranking/fallback de completeWithTools. */
 export async function completeSimple(config: AssistantConfig, system: string, userMessage: string): Promise<string> {
-  if (config.ai_provider === 'openrouter' || config.ai_provider === 'openai') {
-    const url = config.ai_provider === 'openai' ? OPENAI_URL : OPENROUTER_URL
-    const defaultModel = config.ai_provider === 'openai' ? 'gpt-4o-mini' : 'anthropic/claude-3.5-sonnet'
-    const res = await openAiCompatibleFetch(config, url, {
-      model: config.ai_model?.trim() || defaultModel,
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: userMessage },
-      ],
-    })
-    return res.choices?.[0]?.message?.content ?? ''
+  const engines = await getEnabledPlatformEngines()
+  if (engines.length === 0) throw new Error('nenhum motor de IA da plataforma habilitado (ver painel superadmin)')
+
+  let lastErr: unknown
+  for (const engine of engines) {
+    try {
+      return await runSimple(engine, system, userMessage)
+    } catch (err) {
+      lastErr = err
+      console.warn(`[ai-fallback] motor "${engine.label}" falhou (interpretação), tentando o próximo do ranking:`, err)
+    }
   }
-  const client = anthropicClient(config)
-  const res = await client.messages.create({
-    model: 'claude-opus-5',
-    max_tokens: 1024,
-    system,
-    messages: [{ role: 'user', content: userMessage }],
+  throw lastErr instanceof Error ? lastErr : new Error('todos os motores de IA da plataforma falharam')
+}
+
+async function runSimple(engine: PlatformEngine, system: string, userMessage: string): Promise<string> {
+  if (engine.provider === 'anthropic') {
+    const res = await defaultAnthropic.messages.create({
+      model: engine.model,
+      max_tokens: 1024,
+      system,
+      messages: [{ role: 'user', content: userMessage }],
+    })
+    return res.content.find((b) => b.type === 'text')?.text ?? ''
+  }
+  const url = engine.provider === 'openai' ? OPENAI_URL : OPENROUTER_URL
+  const res = await openAiCompatibleFetch(platformKeyFor(engine), engine, url, {
+    model: engine.model,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: userMessage },
+    ],
   })
-  return res.content.find((b) => b.type === 'text')?.text ?? ''
+  return res.choices?.[0]?.message?.content ?? ''
 }
 
-function anthropicClient(config: AssistantConfig): Anthropic {
-  const key = config.anthropic_api_key?.trim()
-  // O mesmo campo guarda a chave de qualquer provedor escolhido — se o
-  // lojista trocou de outro provedor pra Anthropic sem limpar o campo, a
-  // chave antiga não tem o formato certo (sk-ant-...) e quebraria com
-  // 401; nesse caso ignora e cai no fallback global, em vez de falhar.
-  return key && key.startsWith('sk-ant-') ? new Anthropic({ apiKey: key }) : defaultAnthropic
-}
-
-async function completeWithToolsAnthropic(
-  config: AssistantConfig,
+async function runWithTools(
+  engine: PlatformEngine,
   system: string,
   history: ChatMessage[],
   userMessage: string,
   toolCtx: ToolCtx,
 ): Promise<{ reply: string; toolCalls: ToolCallRecord[] }> {
-  const client = anthropicClient(config)
+  if (engine.provider === 'anthropic') {
+    return runToolsAnthropic(engine, system, history, userMessage, toolCtx)
+  }
+  const url = engine.provider === 'openai' ? OPENAI_URL : OPENROUTER_URL
+  return runToolsOpenAiCompatible(engine, url, system, history, userMessage, toolCtx)
+}
+
+async function runToolsAnthropic(
+  engine: PlatformEngine,
+  system: string,
+  history: ChatMessage[],
+  userMessage: string,
+  toolCtx: ToolCtx,
+): Promise<{ reply: string; toolCalls: ToolCallRecord[] }> {
   const messages: Anthropic.MessageParam[] = history.map((m) => ({ role: m.role, content: m.content }))
   messages.push({ role: 'user', content: userMessage })
 
   const toolCalls: ToolCallRecord[] = []
   let finalText = ''
   for (let i = 0; i < 6; i++) {
-    const res = await client.messages.create({
-      model: 'claude-opus-5',
+    const res = await defaultAnthropic.messages.create({
+      model: engine.model,
       max_tokens: 1024,
       system,
       tools,
@@ -124,9 +163,17 @@ type OrResponse = {
   choices?: { message: OrMessage; finish_reason: string }[]
 }
 
-async function openAiCompatibleFetch(config: AssistantConfig, url: string, body: Record<string, unknown>): Promise<OrResponse> {
-  const key = config.anthropic_api_key?.trim()
-  if (!key) throw new Error(`chave da API não configurada pra essa loja (provedor: ${config.ai_provider})`)
+async function openAiCompatibleFetch(
+  key: string | undefined,
+  engine: PlatformEngine,
+  url: string,
+  body: Record<string, unknown>,
+): Promise<OrResponse> {
+  if (!key) {
+    throw new Error(
+      `${engine.provider === 'openai' ? 'OPENAI_API_KEY' : 'OPENROUTER_API_KEY'} não configurada na plataforma (motor "${engine.label}")`,
+    )
+  }
   const res = await fetch(url, {
     method: 'POST',
     headers: {
@@ -137,7 +184,7 @@ async function openAiCompatibleFetch(config: AssistantConfig, url: string, body:
   })
   if (!res.ok) {
     const text = await res.text().catch(() => '')
-    throw new Error(`${config.ai_provider} retornou ${res.status}: ${text}`)
+    throw new Error(`${engine.provider} (${engine.label}) retornou ${res.status}: ${text}`)
   }
   return (await res.json()) as OrResponse
 }
@@ -148,16 +195,15 @@ const openAiTools = tools.map((t) => ({
   function: { name: t.name, description: t.description, parameters: t.input_schema },
 }))
 
-async function completeWithToolsOpenAiCompatible(
-  config: AssistantConfig,
+async function runToolsOpenAiCompatible(
+  engine: PlatformEngine,
   url: string,
-  defaultModel: string,
   system: string,
   history: ChatMessage[],
   userMessage: string,
   toolCtx: ToolCtx,
 ): Promise<{ reply: string; toolCalls: ToolCallRecord[] }> {
-  const model = config.ai_model?.trim() || defaultModel
+  const key = platformKeyFor(engine)
   const messages: OrMessage[] = [
     { role: 'system', content: system },
     ...history.map((m): OrMessage => ({ role: m.role, content: m.content })),
@@ -167,8 +213,8 @@ async function completeWithToolsOpenAiCompatible(
   const toolCalls: ToolCallRecord[] = []
   let finalText = ''
   for (let i = 0; i < 6; i++) {
-    const res = await openAiCompatibleFetch(config, url, {
-      model,
+    const res = await openAiCompatibleFetch(key, engine, url, {
+      model: engine.model,
       messages,
       tools: openAiTools,
       // Mesma regra de negócio do lado Anthropic — ver comentário lá.
