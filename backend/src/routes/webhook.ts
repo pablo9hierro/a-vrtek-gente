@@ -3,6 +3,7 @@ import { pool } from '../db/pool.js'
 import { isBetaTenant } from '../services/beta.js'
 import { runPipeline, MSG_SPLIT_MARKER, INTERNAL_PROMPT_VERSION, type AssistantConfig } from '../agents/pipeline.js'
 import { sendWhatsappMessage } from '../evolution-adapter/send.js'
+import { transcribeAudio } from '../agents/transcription.js'
 
 export const webhookRouter = Router()
 
@@ -10,7 +11,12 @@ type ForwardedEvolutionPayload = {
   tenant_slug: string
   instance: string
   phone: string
-  text: string
+  /** Ausente quando a mensagem é de áudio (ver audio_base64) — nunca os dois ao mesmo tempo. */
+  text?: string
+  /** Mensagem de voz recebida no WhatsApp, já baixada em base64 pelo ecommerce-api. */
+  audio_base64?: string
+  /** Mimetype do áudio (ex: "audio/ogg; codecs=opus") — usado pra transcrever. */
+  audio_mimetype?: string
   customer_name?: string
   /**
    * true = veio do botão "Novo Chat"/caixa de mensagem em /admin/chat
@@ -66,8 +72,9 @@ type PendingBatch = {
 const pendingBatches = new Map<string, PendingBatch>()
 
 async function handleInbound(payload: ForwardedEvolutionPayload) {
-  const { tenant_slug: tenantSlug, instance, phone, text, customer_name: customerNameRaw, simulated } = payload
-  if (!tenantSlug || !phone || !text) return
+  const { tenant_slug: tenantSlug, instance, phone, text: rawText, audio_base64: audioBase64, audio_mimetype: audioMimetype, customer_name: customerNameRaw, simulated } = payload
+  if (!tenantSlug || !phone) return
+  if (!rawText && !audioBase64) return
   if (!isBetaTenant(tenantSlug)) return // fora do beta, ignora silenciosamente
   const customerName = customerNameRaw ?? null
 
@@ -77,6 +84,17 @@ async function handleInbound(payload: ForwardedEvolutionPayload) {
   )
   const config = configRes.rows[0]
   if (!config || !config.enabled) return // assistente desligado nessa loja
+
+  let text = rawText
+  if (!text && audioBase64) {
+    const transcribed = await transcribeAudio(audioBase64, audioMimetype || 'audio/ogg')
+    if (!transcribed) {
+      console.warn(`transcrição de áudio falhou (OpenAI + Gemini) — tenant=${tenantSlug} phone=${phone}`)
+      return // mesmo tratamento de qualquer mídia que hoje não vira mensagem (imagem, sticker, etc)
+    }
+    text = `[Áudio transcrito]: ${transcribed}`
+  }
+  if (!text) return
 
   const conversation = await findOrOpenConversation(
     tenantSlug,
