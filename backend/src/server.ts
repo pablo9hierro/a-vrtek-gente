@@ -7,6 +7,7 @@ import { webhookRouter } from './routes/webhook.js'
 import { platformAiEnginesRouter } from './routes/platformAiEngines.js'
 import { ragRouter } from './rag/upload.js'
 import { runMigrations } from './db/migrate.js'
+import { startCloseExpiredConversationsJob } from './jobs/closeExpiredConversations.js'
 
 const app = express()
 app.use(
@@ -33,6 +34,9 @@ const port = Number(process.env.PORT) || 8090
 
 runMigrations()
   .then(() => {
+    // Encerra conversa parada além do window_timeout_minutes do tenant —
+    // antes só fechava quando o mesmo cliente voltava a falar.
+    startCloseExpiredConversationsJob()
     app.listen(port, () => {
       console.log(`assistant-ia backend rodando em http://localhost:${port}`)
     })
