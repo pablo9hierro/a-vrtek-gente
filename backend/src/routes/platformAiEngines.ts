@@ -16,7 +16,7 @@ export const platformAiEnginesRouter = Router()
 // aqui, nunca o navegador direto. Ver internalAuth.ts.
 platformAiEnginesRouter.use('/ai-engines', internalAuthGate)
 
-const VALID_PROVIDERS: PlatformAiProvider[] = ['anthropic', 'openai', 'openrouter']
+const VALID_PROVIDERS: PlatformAiProvider[] = ['openai', 'openrouter']
 
 platformAiEnginesRouter.get('/ai-engines', async (_req, res) => {
   res.json(await listAllPlatformEngines())

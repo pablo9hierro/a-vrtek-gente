@@ -19,11 +19,14 @@ configRouter.use('/:tenantSlug/config', internalAuthGate)
 
 // prompt_validator saiu do controle do tenant (virou parte fixa de
 // universalValidatorRules, ver pipeline.ts) — nunca mais lido nem escrito
-// aqui, mesmo que a coluna ainda exista no banco com dado antigo. Lista
-// explícita de colunas (não SELECT *) garante que o campo nunca volta a
-// vazar pra resposta por acidente, ex: se alguém reintroduzir SELECT *.
+// aqui, mesmo que a coluna ainda exista no banco com dado antigo. Idem
+// pra ai_provider/ai_model/anthropic_api_key: qual motor de IA responde
+// deixou de ser escolha do tenant — agora é 100% ranking do superadmin
+// (ver platformEngines.ts/aiClient.ts). Colunas continuam existindo no
+// banco (não é destrutivo) mas saem da lista explícita — nunca mais lidas
+// nem escritas por aqui, mesmo que alguém reintroduza SELECT *.
 const CONFIG_COLUMNS = `tenant_id, enabled, prompt_interpreter, start_keywords, end_keywords, window_timeout_minutes,
-  message_batch_window_seconds, min_response_chars, max_response_chars, anthropic_api_key, ai_provider, ai_model, updated_at`
+  message_batch_window_seconds, min_response_chars, max_response_chars, updated_at`
 
 configRouter.get('/:tenantSlug/config', betaGate, async (req, res) => {
   const tenantSlug = req.params.tenantSlug
@@ -42,9 +45,6 @@ configRouter.get('/:tenantSlug/config', betaGate, async (req, res) => {
       message_batch_window_seconds: 8,
       min_response_chars: 150,
       max_response_chars: 300,
-      anthropic_api_key: null,
-      ai_provider: 'anthropic',
-      ai_model: null,
     })
     return
   }
@@ -54,13 +54,14 @@ configRouter.get('/:tenantSlug/config', betaGate, async (req, res) => {
 configRouter.put('/:tenantSlug/config', betaGate, async (req, res) => {
   const tenantSlug = req.params.tenantSlug
   const body = req.body as Partial<AssistantConfig>
-  // prompt_validator nunca é lido do body, mesmo que o cliente mande —
-  // não é mais um campo que o tenant controla (ver pipeline.ts).
+  // prompt_validator e ai_provider/ai_model/anthropic_api_key nunca são
+  // lidos do body, mesmo que o cliente mande — não são mais campos que o
+  // tenant controla (ver pipeline.ts e aiClient.ts/platformEngines.ts).
   const { rows } = await pool.query<AssistantConfig>(
     `INSERT INTO assistant_ia.assistant_config
        (tenant_id, enabled, prompt_interpreter, start_keywords, end_keywords, window_timeout_minutes,
-        message_batch_window_seconds, min_response_chars, max_response_chars, anthropic_api_key, ai_provider, ai_model, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+        message_batch_window_seconds, min_response_chars, max_response_chars, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
      ON CONFLICT (tenant_id) DO UPDATE SET
        enabled = EXCLUDED.enabled,
        prompt_interpreter = EXCLUDED.prompt_interpreter,
@@ -70,9 +71,6 @@ configRouter.put('/:tenantSlug/config', betaGate, async (req, res) => {
        message_batch_window_seconds = EXCLUDED.message_batch_window_seconds,
        min_response_chars = EXCLUDED.min_response_chars,
        max_response_chars = EXCLUDED.max_response_chars,
-       anthropic_api_key = EXCLUDED.anthropic_api_key,
-       ai_provider = EXCLUDED.ai_provider,
-       ai_model = EXCLUDED.ai_model,
        updated_at = now()
      RETURNING ${CONFIG_COLUMNS}`,
     [
@@ -85,9 +83,6 @@ configRouter.put('/:tenantSlug/config', betaGate, async (req, res) => {
       body.message_batch_window_seconds ?? 8,
       body.min_response_chars ?? 150,
       body.max_response_chars ?? 300,
-      body.anthropic_api_key?.trim() || null,
-      body.ai_provider === 'openrouter' ? 'openrouter' : body.ai_provider === 'openai' ? 'openai' : 'anthropic',
-      body.ai_model?.trim() || null,
     ],
   )
   res.json(rows[0])

@@ -1,6 +1,10 @@
 import { pool } from '../db/pool.js'
 
-export type PlatformAiProvider = 'anthropic' | 'openai' | 'openrouter'
+// Anthropic removida por decisão explícita do dono da plataforma — a
+// chave da Anthropic console não é mais usada em lugar nenhum. Só os dois
+// provedores abaixo, ambos "OpenAI-compatible" (mesmo formato de chat
+// completions + function calling), são suportados.
+export type PlatformAiProvider = 'openai' | 'openrouter'
 
 export type PlatformEngine = {
   id: string

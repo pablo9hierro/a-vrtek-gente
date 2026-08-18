@@ -73,12 +73,6 @@ export type AssistantConfig = {
   message_batch_window_seconds: number
   min_response_chars: number
   max_response_chars: number
-  /** Chave própria da loja pro motor de IA escolhido — null/vazia usa a global do processo (só vale pra "anthropic"; "openrouter" exige chave própria). */
-  anthropic_api_key: string | null
-  /** "anthropic" (padrão) ou "openrouter". */
-  ai_provider: string
-  /** Só relevante/obrigatório pra "openrouter" — ex: "anthropic/claude-3.5-sonnet". */
-  ai_model: string | null
 }
 
 type InterpreterOutput = {

@@ -1,4 +1,3 @@
-import type Anthropic from '@anthropic-ai/sdk'
 import { sendWhatsappLocation } from '../evolution-adapter/send.js'
 
 /**
@@ -7,8 +6,9 @@ import { sendWhatsappLocation } from '../evolution-adapter/send.js'
  * Resolutoo (nunca acesso direto ao banco de produção a partir deste
  * módulo). Desenhado pra virar um servidor MCP de verdade depois (uma
  * tool por arquivo/capacidade); por ora são funções TypeScript chamadas
- * via tool use da Anthropic — mesmo contrato de entrada/saída que um MCP
- * tool teria, só sem o protocolo por cima ainda.
+ * via tool use (formato "function calling" comum a OpenAI/OpenRouter) —
+ * mesmo contrato de entrada/saída que um MCP tool teria, só sem o
+ * protocolo por cima ainda.
  *
  * Quem chama essas tools é a IA 2 (validador), não a IA 3 — a IA 3 só
  * recebe o resultado já pronto.
@@ -17,7 +17,17 @@ import { sendWhatsappLocation } from '../evolution-adapter/send.js'
 const ECOMMERCE_API_URL = process.env.ECOMMERCE_API_URL || 'https://ecommerce-api-production-d447.up.railway.app'
 const STORE_BASE_URL = process.env.STORE_BASE_URL || 'https://resolutoo.com'
 
-export const tools: Anthropic.Tool[] = [
+export type ToolDefinition = {
+  name: string
+  description: string
+  input_schema: {
+    type: 'object'
+    properties: Record<string, unknown>
+    required?: string[]
+  }
+}
+
+export const tools: ToolDefinition[] = [
   {
     name: 'buscar_produtos',
     description:
