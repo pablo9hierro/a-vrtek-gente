@@ -19,6 +19,14 @@ type ForwardedEvolutionPayload = {
   audio_mimetype?: string
   customer_name?: string
   /**
+   * true = mensagem escrita pela PRÓPRIA loja (lojista respondendo na mão
+   * pelo WhatsApp dele, com ou sem a IA interrompida em /admin/chat). Entra
+   * no histórico como sender_type=humano e NUNCA aciona a IA — serve só pra
+   * manter o contexto da conversa completo, pra IA enxergar tudo que foi
+   * combinado se voltar a atender depois.
+   */
+  from_lojista?: boolean
+  /**
    * true = veio do botão "Novo Chat"/caixa de mensagem em /admin/chat
    * (ecommerce-api::simulate_assistant_ia_message), não do WhatsApp real.
    * O admin já clicou explicitamente pra simular um cliente — exigir que a
@@ -72,7 +80,7 @@ type PendingBatch = {
 const pendingBatches = new Map<string, PendingBatch>()
 
 async function handleInbound(payload: ForwardedEvolutionPayload) {
-  const { tenant_slug: tenantSlug, instance, phone, text: rawText, audio_base64: audioBase64, audio_mimetype: audioMimetype, customer_name: customerNameRaw, simulated } = payload
+  const { tenant_slug: tenantSlug, instance, phone, text: rawText, audio_base64: audioBase64, audio_mimetype: audioMimetype, customer_name: customerNameRaw, simulated, from_lojista: fromLojista } = payload
   if (!tenantSlug || !phone) return
   if (!rawText && !audioBase64) return
   if (!isBetaTenant(tenantSlug)) return // fora do beta, ignora silenciosamente
@@ -95,6 +103,14 @@ async function handleInbound(payload: ForwardedEvolutionPayload) {
     text = `[Áudio transcrito]: ${transcribed}`
   }
   if (!text) return
+
+  // Mensagem escrita pela própria loja: entra no histórico como 'humano' e
+  // para por aqui — nunca aciona a IA, nunca abre conversa nova (uma
+  // mensagem da loja pra alguém sem atendimento em curso não é atendimento).
+  if (fromLojista) {
+    await recordLojistaMessage(tenantSlug, phone, text)
+    return
+  }
 
   const conversation = await findOrOpenConversation(
     tenantSlug,
@@ -224,6 +240,50 @@ async function processBatch(conversationId: string, config: AssistantConfig) {
   } catch (e) {
     console.error('erro processando lote de mensagens debounced:', e)
   }
+}
+
+/**
+ * Grava no histórico uma mensagem que a LOJA mandou (lojista digitando no
+ * WhatsApp dele), pra IA ter o contexto completo do que foi combinado
+ * enquanto ela estava fora — seja porque o lojista interrompeu o
+ * atendimento em /admin/chat, seja porque ele só respondeu por cima.
+ *
+ * A própria IA envia pela mesma instância da Evolution, então TODA resposta
+ * dela também volta como fromMe — sem deduplicar, cada resposta da IA
+ * seria gravada duas vezes (uma como 'assistente', outra como 'humano').
+ * Por isso ignora o eco: mensagem idêntica (ou contida) numa resposta da
+ * assistente nos últimos 5 minutos nessa mesma conversa. Resposta com
+ * Pix/link sai partida em duas mensagens (MSG_SPLIT_MARKER) mas é gravada
+ * junta, então o eco de cada parte casa por `position(...)`, não por
+ * igualdade — daí o LIKE. Texto curto (< 20 chars) exige igualdade exata,
+ * senão um "ok" do lojista sumiria por acaso dentro de qualquer resposta.
+ */
+async function recordLojistaMessage(tenantSlug: string, phone: string, text: string) {
+  const existing = await pool.query<{ id: string }>(
+    `SELECT id FROM assistant_ia.conversations
+     WHERE tenant_id = $1 AND phone = $2 AND status != 'fechada'
+     ORDER BY last_message_at DESC LIMIT 1`,
+    [tenantSlug, phone],
+  )
+  const conversation = existing.rows[0]
+  if (!conversation) return
+
+  const echo = await pool.query<{ id: string }>(
+    `SELECT id FROM assistant_ia.messages
+     WHERE conversation_id = $1 AND sender_type = 'assistente'
+       AND created_at > now() - interval '5 minutes'
+       AND (content = $2 OR (length($2) >= 20 AND position($2 in content) > 0))
+     LIMIT 1`,
+    [conversation.id, text],
+  )
+  if (echo.rows.length > 0) return // eco do envio da própria IA, não é o lojista
+
+  await pool.query(
+    `INSERT INTO assistant_ia.messages (conversation_id, tenant_id, direction, sender_type, content)
+     VALUES ($1, $2, 'outbound', 'humano', $3)`,
+    [conversation.id, tenantSlug, text],
+  )
+  await pool.query(`UPDATE assistant_ia.conversations SET last_message_at = now() WHERE id = $1`, [conversation.id])
 }
 
 async function findOrOpenConversation(
