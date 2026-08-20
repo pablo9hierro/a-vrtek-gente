@@ -1,6 +1,7 @@
 import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
+import swaggerUi from 'swagger-ui-express'
 import { configRouter } from './routes/config.js'
 import { conversationsRouter } from './routes/conversations.js'
 import { webhookRouter } from './routes/webhook.js'
@@ -8,6 +9,7 @@ import { platformAiEnginesRouter } from './routes/platformAiEngines.js'
 import { ragRouter } from './rag/upload.js'
 import { runMigrations } from './db/migrate.js'
 import { startCloseExpiredConversationsJob } from './jobs/closeExpiredConversations.js'
+import { openApiSpec } from './openapi.js'
 
 const app = express()
 app.use(
@@ -23,6 +25,9 @@ app.use(
 app.use(express.json({ limit: '15mb' }))
 
 app.get('/health', (_req, res) => res.json({ ok: true }))
+
+app.get('/docs/openapi.json', (_req, res) => res.json(openApiSpec))
+app.use('/docs', swaggerUi.serve, swaggerUi.setup(openApiSpec))
 
 app.use('/api/tenants', configRouter)
 app.use('/api/tenants', conversationsRouter)
