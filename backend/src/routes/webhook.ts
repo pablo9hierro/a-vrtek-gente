@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { pool } from '../db/pool.js'
-import { isBetaTenant } from '../services/beta.js'
+import { checkAssistantAccess } from '../services/access.js'
 import { runPipeline, MSG_SPLIT_MARKER, INTERNAL_PROMPT_VERSION, type AssistantConfig } from '../agents/pipeline.js'
 import { sendWhatsappMessage } from '../evolution-adapter/send.js'
 import { transcribeAudio } from '../agents/transcription.js'
@@ -83,7 +83,8 @@ async function handleInbound(payload: ForwardedEvolutionPayload) {
   const { tenant_slug: tenantSlug, instance, phone, text: rawText, audio_base64: audioBase64, audio_mimetype: audioMimetype, customer_name: customerNameRaw, simulated, from_lojista: fromLojista } = payload
   if (!tenantSlug || !phone) return
   if (!rawText && !audioBase64) return
-  if (!isBetaTenant(tenantSlug)) return // fora do beta, ignora silenciosamente
+  const access = await checkAssistantAccess(tenantSlug)
+  if (!access.allowed) return // sem acesso ao assistente (fora do plano/sem add-on), ignora silenciosamente
   const customerName = customerNameRaw ?? null
 
   const configRes = await pool.query<AssistantConfig>(

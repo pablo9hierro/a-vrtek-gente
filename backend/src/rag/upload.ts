@@ -1,16 +1,17 @@
 import { Router } from 'express'
 import multer from 'multer'
 import { pool } from '../db/pool.js'
-import { isBetaTenant } from '../services/beta.js'
+import { checkAssistantAccess } from '../services/access.js'
 import { internalAuthGate } from '../services/internalAuth.js'
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } })
 
 export const ragRouter = Router()
 
-function betaGate(req: any, res: any, next: any) {
-  if (!isBetaTenant(String(req.params.tenantSlug || ''))) {
-    res.status(404).json({ error: 'Assistente IA não disponível pra essa loja ainda.' })
+async function betaGate(req: any, res: any, next: any) {
+  const access = await checkAssistantAccess(String(req.params.tenantSlug || ''))
+  if (!access.allowed) {
+    res.status(404).json({ error: 'reason' in access ? access.reason : 'Assistente IA não disponível pra essa loja.' })
     return
   }
   next()

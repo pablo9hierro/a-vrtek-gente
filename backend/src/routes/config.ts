@@ -1,17 +1,46 @@
 import { Router } from 'express'
 import { pool } from '../db/pool.js'
-import { isBetaTenant } from '../services/beta.js'
+import { checkAssistantAccess } from '../services/access.js'
 import { internalAuthGate } from '../services/internalAuth.js'
 import type { AssistantConfig } from '../agents/pipeline.js'
 
 export const configRouter = Router()
 
-function betaGate(req: any, res: any, next: any) {
-  const tenantSlug = String(req.params.tenantSlug || '')
-  if (!isBetaTenant(tenantSlug)) {
-    res.status(404).json({ error: 'Assistente IA não disponível pra essa loja ainda.' })
+const VRTECH_BASE_URL = process.env.VRTECH_BASE_URL || 'https://vrtech-jp.vercel.app'
+
+/**
+ * O ramo eletrônica ainda roda o pipeline/tools local do vrtech (agenda,
+ * catálogo próprio) -- só a config (prompt, gatilhos, timeouts) passou a
+ * ser editada aqui. Sem esse write-through, editar em /meu-plano não teria
+ * nenhum efeito nas conversas reais de WhatsApp do vrtech. Best-effort: se
+ * o vrtech estiver fora do ar, a config aqui já foi salva de qualquer forma.
+ */
+async function syncToVrtech(config: Partial<AssistantConfig>): Promise<void> {
+  const secret = process.env.ASSISTANT_SYNC_SECRET
+  if (!secret) {
+    console.error('[config] ASSISTANT_SYNC_SECRET não configurado — sync com vrtech pulado')
     return
   }
+  try {
+    const res = await fetch(`${VRTECH_BASE_URL}/api/assistant/config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', 'x-sync-secret': secret },
+      body: JSON.stringify(config),
+    })
+    if (!res.ok) console.error('[config] sync com vrtech falhou:', res.status, await res.text().catch(() => ''))
+  } catch (e) {
+    console.error('[config] sync com vrtech falhou:', e)
+  }
+}
+
+async function betaGate(req: any, res: any, next: any) {
+  const tenantSlug = String(req.params.tenantSlug || '')
+  const access = await checkAssistantAccess(tenantSlug)
+  if (!access.allowed) {
+    res.status(404).json({ error: 'reason' in access ? access.reason : 'Assistente IA não disponível pra essa loja.' })
+    return
+  }
+  req.vertical = access.vertical
   next()
 }
 
@@ -86,4 +115,6 @@ configRouter.put('/:tenantSlug/config', betaGate, async (req, res) => {
     ],
   )
   res.json(rows[0])
+
+  if ((req as any).vertical === 'eletronica') void syncToVrtech(rows[0])
 })
