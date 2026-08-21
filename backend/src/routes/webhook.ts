@@ -56,6 +56,44 @@ webhookRouter.post('/evolution', async (req, res) => {
   }
 })
 
+/**
+ * POST /webhook/presence — cliente digitando/gravando áudio no WhatsApp
+ * (encaminhado pelo ecommerce-api). Se já existe um lote pendente pra essa
+ * conversa (mensagem de texto aguardando o debounce normal), estende o
+ * timer pela janela de tolerância inteira de novo -- efeito prático:
+ * enquanto o cliente continuar sinalizando que está digitando, a resposta
+ * não sai. Sem lote pendente (cliente só digitando, ainda não mandou nada)
+ * não há o que segurar, ignora.
+ */
+webhookRouter.post('/presence', async (req, res) => {
+  res.status(200).json({ ok: true })
+  try {
+    const { tenant_slug: tenantSlug, phone } = req.body as { tenant_slug?: string; phone?: string }
+    if (!tenantSlug || !phone) return
+    const configRes = await pool.query<AssistantConfig>(
+      `SELECT message_batch_window_seconds FROM assistant_ia.assistant_config WHERE tenant_id = $1`,
+      [tenantSlug],
+    )
+    const debounceMs = configRes.rows[0]?.message_batch_window_seconds
+      ? configRes.rows[0].message_batch_window_seconds * 1000
+      : DEFAULT_DEBOUNCE_MS
+    const conv = await pool.query<{ id: string }>(
+      `SELECT id FROM assistant_ia.conversations
+       WHERE tenant_id = $1 AND phone = $2 AND status != 'fechada'
+       ORDER BY last_message_at DESC LIMIT 1`,
+      [tenantSlug, phone],
+    )
+    const conversationId = conv.rows[0]?.id
+    if (!conversationId) return
+    const pending = pendingBatches.get(conversationId)
+    if (!pending) return // nada aguardando resposta ainda, não há o que estender
+    clearTimeout(pending.timer)
+    pending.timer = setTimeout(() => void processBatch(conversationId, pending.config), debounceMs)
+  } catch (e) {
+    console.error('erro processando presence.update:', e)
+  }
+})
+
 // Padrão (se o lojista não configurar `message_batch_window_seconds` em
 // /meu-plano/assistente-ia) — 3s era curto demais pro ritmo real de
 // digitação humana, então o default subiu pra 8s.
@@ -69,6 +107,7 @@ type PendingBatch = {
   phone: string
   customerName: string | null
   conversationId: string
+  config: AssistantConfig
 }
 
 // Cliente que manda várias mensagens em sequência (comum no WhatsApp) não
@@ -187,6 +226,7 @@ function scheduleDebouncedReply(
     phone: args.phone,
     customerName: args.customerName,
     conversationId,
+    config: args.config,
     timer: setTimeout(() => void processBatch(conversationId, args.config), debounceMs),
   }
   pendingBatches.set(conversationId, batch)
