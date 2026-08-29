@@ -1,6 +1,18 @@
 import { tools, executeTool, type ToolDefinition } from './tools.js'
 import type { AssistantConfig } from './pipeline.js'
 import { getEnabledPlatformEngines, type PlatformEngine } from './platformEngines.js'
+import { resolveTenantVertical, resolveOfereceServicos } from '../services/tenantVertical.js'
+
+/** Tools que só fazem sentido pra quem cadastrou serviço/agendamento --
+ * fora dessa lista, tudo (produto, pedido, entrega, localização) é comum
+ * a qualquer tenant. Ver `resolveOfereceServicos`. */
+const SERVICE_TOOL_NAMES = new Set([
+  'buscar_servicos',
+  'agendar_horario',
+  'desmarcar_horario',
+  'editar_horario',
+  'consultar_agendamentos',
+])
 
 export type ToolCallRecord = { tool: string; input: unknown; output: string }
 export type ChatMessage = { role: 'user' | 'assistant'; content: string }
@@ -123,10 +135,23 @@ async function openAiCompatibleFetch(
 }
 
 /** Mesmo formato de `tools` convertido pra "function calling" (OpenAI/OpenRouter usam o mesmo schema). */
-const openAiTools = tools.map((t: ToolDefinition) => ({
-  type: 'function' as const,
-  function: { name: t.name, description: t.description, parameters: t.input_schema },
-}))
+function toOpenAiTool(t: ToolDefinition) {
+  return {
+    type: 'function' as const,
+    function: { name: t.name, description: t.description, parameters: t.input_schema },
+  }
+}
+
+/** Set completo (usado sempre que não dá pra resolver o tenant -- nunca
+ * trava o assistente por causa disso, só não filtra). */
+const openAiToolsAll = tools.map(toOpenAiTool)
+
+async function toolsForTenant(tenantSlug: string) {
+  const vertical = await resolveTenantVertical(tenantSlug)
+  const ofereceServicos = await resolveOfereceServicos(tenantSlug, vertical)
+  if (ofereceServicos) return openAiToolsAll
+  return tools.filter((t: ToolDefinition) => !SERVICE_TOOL_NAMES.has(t.name)).map(toOpenAiTool)
+}
 
 async function runToolsOpenAiCompatible(
   engine: PlatformEngine,
@@ -137,6 +162,7 @@ async function runToolsOpenAiCompatible(
   toolCtx: ToolCtx,
 ): Promise<{ reply: string; toolCalls: ToolCallRecord[] }> {
   const key = platformKeyFor(engine)
+  const openAiTools = await toolsForTenant(toolCtx.tenantSlug)
   const messages: OrMessage[] = [
     { role: 'system', content: system },
     ...history.map((m): OrMessage => ({ role: m.role, content: m.content })),

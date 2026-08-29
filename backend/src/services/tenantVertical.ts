@@ -39,3 +39,33 @@ export async function resolveTenantVertical(tenantSlug: string): Promise<Vertica
   cache.set(tenantSlug, { vertical, expiresAt: Date.now() + CACHE_TTL_MS })
   return vertical
 }
+
+/**
+ * Motor ecommerce genérico (opcional): o lojista oferece serviços além de
+ * produtos? Controla se as tools de serviço/agendamento entram no set que
+ * a IA recebe (`aiClient.ts`) e se o prompt menciona serviço — sem isso,
+ * um tenant só-produto ficaria com a IA tentando oferecer/agendar serviço
+ * que ele nem cadastrou. Ramo eletrônica sempre `true` (não usa esta
+ * coluna, é obrigatório lá — ver `oferece_servicos` no backend Rust).
+ */
+const offerCache = new Map<string, { value: boolean; expiresAt: number }>()
+
+export async function resolveOfereceServicos(tenantSlug: string, vertical: Vertical | null): Promise<boolean> {
+  if (vertical === 'eletronica') return true
+  const cached = offerCache.get(tenantSlug)
+  if (cached && cached.expiresAt > Date.now()) return cached.value
+
+  let value = false
+  try {
+    const res = await fetch(`${ECOMMERCE_API_URL}/api/public/tenant-config/${encodeURIComponent(tenantSlug)}`)
+    if (res.ok) {
+      const body = (await res.json()) as { oferece_servicos?: boolean }
+      value = Boolean(body.oferece_servicos)
+    }
+  } catch (e) {
+    console.error('[tenantVertical] falha ao resolver oferece_servicos de', tenantSlug, e)
+  }
+
+  offerCache.set(tenantSlug, { value, expiresAt: Date.now() + CACHE_TTL_MS })
+  return value
+}
