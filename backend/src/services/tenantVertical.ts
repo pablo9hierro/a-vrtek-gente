@@ -9,6 +9,14 @@
  */
 
 const ECOMMERCE_API_URL = process.env.ECOMMERCE_API_URL || 'https://ecommerce-api-production-d447.up.railway.app'
+// BUG-018: `oferece_servicos` NUNCA mora no ecommerce-api -- é config da
+// assinatura/plano, dona da plataforma (ufersin-api/"Resolutoo"), não do
+// motor de e-commerce. `resolveOfereceServicos` batia em
+// `${ECOMMERCE_API_URL}/api/public/tenant-config/...`, rota que nunca
+// existiu ali (404 sempre) -- por isso `oferece_servicos` sempre resolvia
+// `false` silenciosamente e a Assistente IA nunca via as tools de serviço,
+// mesmo em lojas com serviço cadastrado e a preferência ligada.
+const PLATFORM_API_URL = process.env.PLATFORM_API_URL || 'https://ufersin-api-production.up.railway.app'
 const CACHE_TTL_MS = 5 * 60 * 1000
 
 export type Vertical = 'ecommerce' | 'eletronica'
@@ -57,10 +65,14 @@ export async function resolveOfereceServicos(tenantSlug: string, vertical: Verti
 
   let value = false
   try {
-    const res = await fetch(`${ECOMMERCE_API_URL}/api/public/tenant-config/${encodeURIComponent(tenantSlug)}`)
+    const res = await fetch(`${PLATFORM_API_URL}/api/public/tenant-config/${encodeURIComponent(tenantSlug)}`)
     if (res.ok) {
       const body = (await res.json()) as { oferece_servicos?: boolean }
       value = Boolean(body.oferece_servicos)
+    } else {
+      console.error(
+        `[tenantVertical] tenant-config de ${tenantSlug} respondeu ${res.status} (${PLATFORM_API_URL}) -- oferece_servicos ficando false por segurança, mas isso NÃO deveria acontecer`,
+      )
     }
   } catch (e) {
     console.error('[tenantVertical] falha ao resolver oferece_servicos de', tenantSlug, e)
