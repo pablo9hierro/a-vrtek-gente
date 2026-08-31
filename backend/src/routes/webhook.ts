@@ -7,6 +7,50 @@ import { transcribeAudio } from '../agents/transcription.js'
 
 export const webhookRouter = Router()
 
+/**
+ * BUG-019 (rede de segurança): o prompt já proíbe markdown de link/imagem,
+ * mas LLM às vezes ignora instrução -- WhatsApp não renderiza
+ * `[texto](url)` nem `![alt](url)`, aparece literal e quebrado pro
+ * cliente. Corrige na saída, sempre, antes de qualquer envio real.
+ */
+function sanitizeForWhatsapp(text: string): string {
+  return text
+    .replace(/!\[[^\]]*\]\([^)]+\)\s*/g, '') // imagem markdown -> some (nunca deveria estar na resposta pro cliente)
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1: $2') // link markdown -> "texto: url" (WhatsApp deixa a URL clicável sozinho)
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function normalizeForKeywordMatch(s: string): string {
+  return s
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '') // remove acentos (ola/olá batem igual)
+}
+
+/**
+ * BUG-019: start_keywords/end_keywords eram comparados com `.includes()`
+ * (substring cru) -- uma keyword de 2-3 letras como "oi" batia dentro de
+ * QUALQUER palavra que contivesse essa sequência, mesmo sem ser a palavra
+ * inteira: "depois", "noite", "apoio" todas contêm "oi". Isso disparava o
+ * atendimento (ou reabria depois de "encerrar") em mensagens que não
+ * tinham nenhuma saudação/gatilho real. Agora exige a palavra inteira
+ * (fronteira de palavra), não só a sequência de caracteres em qualquer
+ * lugar do texto.
+ */
+function matchesKeyword(text: string, keywords: string[] | null | undefined): boolean {
+  if (!keywords?.length) return false
+  const normalizedText = normalizeForKeywordMatch(text)
+  return keywords.some((kw) => {
+    const nkw = normalizeForKeywordMatch(kw.trim())
+    if (!nkw) return false
+    // Keyword pode ser uma frase ("quero comprar") -- escapa regex e usa
+    // fronteira de palavra nas duas pontas da frase inteira.
+    const escaped = nkw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    return new RegExp(`(?:^|\\W)${escaped}(?:$|\\W)`, 'i').test(normalizedText)
+  })
+}
+
 type ForwardedEvolutionPayload = {
   tenant_slug: string
   instance: string
@@ -178,7 +222,7 @@ async function handleInbound(payload: ForwardedEvolutionPayload) {
   // fica esperando atendimento humano. Histórico já foi salvo acima.
   if (!conversation.assistant_enabled || conversation.human_override) return
 
-  const encerramento = (config.end_keywords ?? []).some((kw) => text.toLowerCase().includes(kw.toLowerCase()))
+  const encerramento = matchesKeyword(text, config.end_keywords)
   if (encerramento) {
     cancelPendingBatch(conversation.id)
     await pool.query(`UPDATE assistant_ia.conversations SET status = 'fechada', closed_at = now() WHERE id = $1`, [
@@ -255,7 +299,10 @@ async function processBatch(conversationId: string, config: AssistantConfig) {
     // WhatsApp, pro cliente conseguir copiar/tocar o código sozinho, sem
     // texto grudado. O histórico salva o texto completo (com quebra de
     // linha no lugar do marcador), só o ENVIO real que sai em duas partes.
-    const replyParts = result.reply.split(MSG_SPLIT_MARKER).map((p) => p.trim()).filter(Boolean)
+    const replyParts = result.reply
+      .split(MSG_SPLIT_MARKER)
+      .map((p) => sanitizeForWhatsapp(p.trim()))
+      .filter(Boolean)
     const storedContent = replyParts.join('\n\n')
 
     const outboundMessage = await pool.query<{ id: string }>(
@@ -355,7 +402,7 @@ async function findOrOpenConversation(
   // mensagem simulada pelo admin ("Novo Chat"), que já é um pedido
   // explícito de abrir uma conversa de teste, não uma mensagem solta de
   // desconhecido no WhatsApp real.
-  const iniciou = simulated || (startKeywords ?? []).some((kw) => text.toLowerCase().includes(kw.toLowerCase()))
+  const iniciou = simulated || matchesKeyword(text, startKeywords)
   if (!iniciou) return null
 
   // Fecha qualquer janela velha que passou do timeout, antes de abrir uma nova.
