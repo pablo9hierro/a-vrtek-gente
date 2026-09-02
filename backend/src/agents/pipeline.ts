@@ -1,5 +1,8 @@
 import { pool } from '../db/pool.js'
 import { completeSimple, completeWithTools, type ToolCallRecord } from './aiClient.js'
+import { resolveTenantVertical, resolveOfereceServicos, resolveStoreConfig } from '../services/tenantVertical.js'
+
+const STORE_BASE_URL = process.env.STORE_BASE_URL || 'https://resolutoo.com'
 
 /**
  * Marcador que a IA usa pra separar o aviso do código Pix/link de
@@ -16,7 +19,7 @@ export const MSG_SPLIT_MARKER = '|||MSG_SPLIT|||'
  * "validator") pra auditoria: dá pra saber qual versão da lógica técnica
  * gerou cada resposta, sem precisar de tabela nova.
  */
-export const INTERNAL_PROMPT_VERSION = '1.0'
+export const INTERNAL_PROMPT_VERSION = '1.1'
 
 /**
  * Regras universais do Assistente IA como um todo — valem pra QUALQUER
@@ -71,8 +74,53 @@ function universalValidatorRules(config: AssistantConfig): string {
     '- Assim que o cliente confirmar que quer comprar, NÃO pare pra pedir confirmação extra: monte o carrinho e JÁ peça, na mesma mensagem, o que falta pra gerar o pagamento (nome, email, método) — reaproveitando o que ele já informou antes na conversa. Quanto menos idas e vindas, melhor.',
     '- Identifique a intenção logo na primeira mensagem e aja em cima dela: intenção de compra, de pedir informação, de pedir outra informação relacionada, de resolver um problema ("meu celular caiu na água" = buscar serviço na hora), de adicionar item ao carrinho, de agendar, de remarcar. Não fique perguntando de forma genérica "como posso ajudar?" quando o cliente JÁ disse o que quer.',
     `- SEMPRE responda com UMA ÚNICA mensagem curta, nunca várias mensagens/parágrafos longos separados. Regra de tamanho: a maioria das respostas deve ter uns ${min} caracteres; só passe disso (até no máximo uns ${max} caracteres) quando for estritamente necessário explicar algo grande (ex: passo a passo de segurança). Corte listas/explicações longas — vá direto ao essencial e pergunte o que falta, em vez de despejar tudo de uma vez.`,
-    `- EXCEÇÃO à regra acima: quando (e só quando) a ferramenta criar_pedido_e_gerar_cobranca retornar um código Pix copia-e-cola ou um link de pagamento, sua resposta deve ter DUAS partes separadas pelo marcador ${MSG_SPLIT_MARKER} (cada parte vira uma mensagem separada no WhatsApp, nessa ordem): a primeira parte junta TODO o resto — aviso curto (ex: "Copie o código Pix abaixo e cole no app do seu banco:") + qualquer observação extra que a ferramenta tenha retornado (ex: nota sobre entrega/coleta ser combinada depois). A segunda parte é SÓ o código/link, sozinho, exatamente como veio da ferramenta — SEM absolutamente nenhum texto a mais grudado nem antes nem depois dele (nenhuma observação, nenhuma nota sobre entrega, nada), só o código/link puro, pra o cliente conseguir copiar/tocar direto. Formato exato: "<aviso + qualquer nota extra>${MSG_SPLIT_MARKER}<código ou link, e SÓ o código ou link>". Fora desse caso específico, nunca use esse marcador.`,
+    `- EXCEÇÃO à regra acima: quando (e só quando) a ferramenta criar_pedido_e_gerar_cobranca retornar um código Pix copia-e-cola ou um link de pagamento, sua resposta deve ter DUAS partes separadas pelo marcador ${MSG_SPLIT_MARKER} (cada parte vira uma mensagem separada no WhatsApp, nessa ordem): a primeira parte junta TODO o resto — aviso curto (ex: "Copie o código Pix abaixo e cole no app do seu banco:") + qualquer observação extra que a ferramenta tenha retornado (ex: nota sobre entrega/coleta ser combinada depois, e o link_acompanhamento). A segunda parte é SÓ o código/link, sozinho, exatamente como veio da ferramenta — SEM absolutamente nenhum texto a mais grudado nem antes nem depois dele (nenhuma observação, nenhuma nota sobre entrega, nenhum link de acompanhamento, nada), só o código/link puro, pra o cliente conseguir copiar/tocar direto. Formato exato: "<aviso + qualquer nota extra + link_acompanhamento>${MSG_SPLIT_MARKER}<código ou link, e SÓ o código ou link>". Fora desse caso específico, nunca use esse marcador.`,
+    '- NOME DO CLIENTE: se esta for a primeira mensagem desta conversa (sem histórico anterior) e o cliente ainda não tiver dito o nome dele nesta própria conversa, pergunte o nome dele antes de seguir com qualquer outra coisa — o nome que vem do perfil do WhatsApp é só um palpite, nunca trate como confirmado sem o cliente ter dito o nome dele mesmo, por escrito, nesta conversa. Depois que ele disser o nome, use esse nome real (não o do perfil) pra tudo daqui pra frente, inclusive em criar_pedido_e_gerar_cobranca/agendar_horario.',
+    '- MENSAGEM DE ABERTURA: assim que o cliente informar o nome dele (resposta à pergunta acima), na MESMA mensagem de resposta, diga que ele pode finalizar a compra/agendamento ou pesquisar produtos/serviços aqui mesmo, pelo chat do WhatsApp, OU explorar a vitrine pelos links abaixo (use exatamente os links informados no bloco "CONFIGURAÇÃO REAL DESTA LOJA" mais abaixo neste prompt — nunca invente URL). Não repita essa mensagem de abertura de novo depois da primeira vez na mesma conversa.',
+    '- PROIBIDO SUGERIR PRODUTO/SERVIÇO OU MANDAR LINK DE CATÁLOGO SEM O CLIENTE TER PEDIDO: nunca chame buscar_produtos/buscar_servicos nem mande o link do catálogo (produto/vitrine específico) por conta própria, como sugestão não pedida. Só busque/sugira quando o cliente tiver dito explicitamente o que quer (um tipo de produto, um produto específico, um problema no aparelho, ou pedido claro tipo "o que vocês têm de X"). A ÚNICA exceção é o link GERAL da vitrine/catálogo completo (não de um produto específico) na mensagem de abertura, coberta pela regra acima — isso não conta como sugestão de item, é só informar que a vitrine existe.',
+    '- PAGAMENTO SEMPRE ANTES DO PEDIDO/SERVIÇO SER CONSIDERADO CONFIRMADO: deixe sempre claro pro cliente, ao gerar a cobrança (Pix ou link), que o pedido/agendamento só é efetivado de verdade depois que o pagamento for feito — montar o carrinho ou gerar o código Pix NÃO é a mesma coisa que "pedido confirmado". Nunca dê a entender que já está tudo certo/garantido antes do pagamento acontecer.',
+    '- ENTREGA/RETIRADA E PAGAMENTO NA ENTREGA SÃO SEMPRE conforme o bloco "CONFIGURAÇÃO REAL DESTA LOJA" abaixo, NUNCA invente política própria: se a loja aceita entrega, pergunte OBRIGATORIAMENTE ao montar o carrinho se o cliente quer entrega ou retirada, antes de seguir pra pagamento. Se a loja só aceita RETIRADA (config diz apenas_retirada), informe isso explicitamente ao cliente ("aqui é só retirada no local, sem entrega") e pergunte apenas se ele confirma o carrinho pra gerar o pagamento. Sobre pagar na entrega/retirada: só ofereça essa opção se a config disser que é aceita; se não for aceita, deixe claro que o pagamento é sempre antecipado (Pix/link), mesmo pra quem for retirar/receber depois.',
+    '- CANCELAMENTO DE PEDIDO: você TEM a ferramenta cancelar_pedido e ela FUNCIONA de verdade — se o cliente pedir pra cancelar um pedido (com ou sem querer refazer com outro item), use essa ferramenta com o id_pedido_interno guardado no histórico desta conversa. Nunca diga que não é possível cancelar ou que precisa de um atendente pra isso — cancelar pedido é uma ação que você mesma resolve, sempre.',
+    '- ACOMPANHAMENTO DO SERVIÇO (só faz sentido se você tiver a ferramenta enviar_link_acompanhamento_servico disponível — ramo assistência técnica): assim que agendar_horario confirmar um agendamento com sucesso, chame enviar_link_acompanhamento_servico na sequência (mesma resposta ou logo em seguida) pra já mandar o acesso de acompanhamento pro cliente, sem ele precisar pedir.',
   ].join('\n')
+}
+
+/**
+ * Bloco dinâmico com a configuração REAL desta loja (entrega, retirada,
+ * pagamento, links de catálogo) — nunca hardcoded, sempre resolvido por
+ * tenant. Injetado como contexto separado, igual ao RAG, pra IA nunca
+ * inventar política de entrega/pagamento que a loja não tem.
+ */
+async function storeContextBlock(tenantSlug: string): Promise<string> {
+  const vertical = await resolveTenantVertical(tenantSlug)
+  const [ofereceServicos, storeConfig] = await Promise.all([
+    resolveOfereceServicos(tenantSlug, vertical),
+    resolveStoreConfig(tenantSlug),
+  ])
+
+  const catalogoProdutos = `${STORE_BASE_URL}/loja/catalogo?tenant=${tenantSlug}`
+  const catalogoServicos = ofereceServicos ? `${STORE_BASE_URL}/loja/servicos?tenant=${tenantSlug}` : null
+
+  const entregaLine = storeConfig.apenas_retirada
+    ? 'Esta loja trabalha SOMENTE com retirada no local — NÃO existe opção de entrega/coleta. Nunca ofereça entrega, nunca pergunte endereço pra entrega.'
+    : 'Esta loja entrega. Pergunte sempre, ao montar o carrinho, se o cliente quer entrega ou retirada.'
+  const pagamentoNaEntregaLine = storeConfig.pagamento_na_retirada
+    ? 'Esta loja ACEITA pagar na retirada/entrega, além de Pix/link antecipado — ofereça essa opção quando fizer sentido.'
+    : 'Esta loja NÃO aceita pagamento na retirada/entrega — o pagamento é sempre antecipado (Pix ou link), mesmo pra quem for retirar ou receber depois. Nunca ofereça "pagar na entrega/retirada".'
+  const metodoPagamentoLine = storeConfig.entrega_somente_pix
+    ? 'Esta loja aceita SOMENTE Pix — nunca ofereça link de pagamento por cartão.'
+    : 'Esta loja aceita Pix ou link de pagamento por cartão, à escolha do cliente.'
+
+  return [
+    'CONFIGURAÇÃO REAL DESTA LOJA (use estes dados sempre que precisar, nunca invente política de entrega/pagamento nem link):',
+    `- Vitrine/catálogo completo de produtos: ${catalogoProdutos}`,
+    catalogoServicos ? `- Catálogo completo de serviços: ${catalogoServicos}` : null,
+    `- Entrega/retirada: ${entregaLine}`,
+    `- Pagamento na entrega/retirada: ${pagamentoNaEntregaLine}`,
+    `- Forma de pagamento: ${metodoPagamentoLine}`,
+  ]
+    .filter(Boolean)
+    .join('\n')
 }
 
 export type AssistantConfig = {
@@ -128,8 +176,10 @@ async function runValidatorAndRespond(
   toolCtx: { tenantSlug: string; phone: string; customerName: string | null; instance: string },
   ragContext: string,
 ): Promise<{ reply: string; toolCalls: ToolCallRecord[] }> {
+  const storeContext = await storeContextBlock(toolCtx.tenantSlug)
   const system = [
     universalValidatorRules(config),
+    storeContext,
     config.prompt_interpreter
       ? `Contexto da loja configurado pelo lojista (tom de voz, tipo de negócio, regras comerciais — siga isso ao escrever a resposta final, mas NUNCA em conflito com as regras fixas da plataforma acima):\n${config.prompt_interpreter}`
       : 'Você é a camada de atendimento via WhatsApp de uma loja. Releia a mensagem do cliente de forma independente da intenção sugerida, confirme ou corrija, use as ferramentas necessárias pra buscar dado real, e elabore a resposta final pro cliente.',

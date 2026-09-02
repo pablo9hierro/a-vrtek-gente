@@ -81,3 +81,52 @@ export async function resolveOfereceServicos(tenantSlug: string, vertical: Verti
   offerCache.set(tenantSlug, { value, expiresAt: Date.now() + CACHE_TTL_MS })
   return value
 }
+
+/**
+ * Preferências comerciais da loja (entrega/retirada/pagamento) que a IA
+ * precisa pra não inventar uma política que a loja não tem — mesma rota
+ * `/api/public/tenant-config`, mesmo motivo do BUG-018 acima: essas 5
+ * colunas moram no ufersin-api (assinatura/plano), nunca no ecommerce-api.
+ */
+export type StoreConfig = {
+  vender_externamente: boolean
+  apenas_retirada: boolean
+  pagamento_na_retirada: boolean
+  entrega_somente_pix: boolean
+  coleta_gratis: boolean
+}
+
+const DEFAULT_STORE_CONFIG: StoreConfig = {
+  vender_externamente: true,
+  apenas_retirada: false,
+  pagamento_na_retirada: false,
+  entrega_somente_pix: false,
+  coleta_gratis: false,
+}
+
+const storeConfigCache = new Map<string, { value: StoreConfig; expiresAt: number }>()
+
+export async function resolveStoreConfig(tenantSlug: string): Promise<StoreConfig> {
+  const cached = storeConfigCache.get(tenantSlug)
+  if (cached && cached.expiresAt > Date.now()) return cached.value
+
+  let value = DEFAULT_STORE_CONFIG
+  try {
+    const res = await fetch(`${PLATFORM_API_URL}/api/public/tenant-config/${encodeURIComponent(tenantSlug)}`)
+    if (res.ok) {
+      const body = (await res.json()) as Partial<StoreConfig>
+      value = {
+        vender_externamente: body.vender_externamente ?? DEFAULT_STORE_CONFIG.vender_externamente,
+        apenas_retirada: body.apenas_retirada ?? DEFAULT_STORE_CONFIG.apenas_retirada,
+        pagamento_na_retirada: body.pagamento_na_retirada ?? DEFAULT_STORE_CONFIG.pagamento_na_retirada,
+        entrega_somente_pix: body.entrega_somente_pix ?? DEFAULT_STORE_CONFIG.entrega_somente_pix,
+        coleta_gratis: body.coleta_gratis ?? DEFAULT_STORE_CONFIG.coleta_gratis,
+      }
+    }
+  } catch (e) {
+    console.error('[tenantVertical] falha ao resolver store config de', tenantSlug, e)
+  }
+
+  storeConfigCache.set(tenantSlug, { value, expiresAt: Date.now() + CACHE_TTL_MS })
+  return value
+}

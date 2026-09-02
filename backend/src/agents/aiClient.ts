@@ -12,6 +12,7 @@ const SERVICE_TOOL_NAMES = new Set([
   'desmarcar_horario',
   'editar_horario',
   'consultar_agendamentos',
+  'enviar_link_acompanhamento_servico',
 ])
 
 export type ToolCallRecord = { tool: string; input: unknown; output: string }

@@ -239,6 +239,15 @@ export const tools: ToolDefinition[] = [
       properties: {},
     },
   },
+  {
+    name: 'enviar_link_acompanhamento_servico',
+    description:
+      'Envia ao cliente o código de acesso e o link pra ele acompanhar o andamento do serviço/ordem de reparo dele (telefone da própria conversa). Use SEMPRE assim que um agendamento (agendar_horario) for confirmado com sucesso — é o jeito do cliente ver o status da ordem de serviço depois, sem precisar voltar a falar contigo.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+    },
+  },
 ]
 
 type ToolCtx = { tenantSlug: string; phone: string; customerName: string | null; instance: string }
@@ -278,6 +287,7 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
     if (name === 'editar_horario')
       return await editarHorario(ctx.tenantSlug, String(input.id_agendamento ?? ''), String(input.nova_data_hora ?? ''))
     if (name === 'consultar_agendamentos') return await consultarAgendamentos(ctx.tenantSlug, ctx.phone)
+    if (name === 'enviar_link_acompanhamento_servico') return await enviarLinkAcompanhamentoServico(ctx.tenantSlug, ctx.phone)
     return `Ferramenta desconhecida: ${name}`
   } catch (e) {
     return `Erro ao consultar: ${e instanceof Error ? e.message : String(e)}`
@@ -549,12 +559,17 @@ async function criarPedidoEGerarCobranca(
     const entregaNote = opts.querEntregaOuColeta
       ? ' A entrega/coleta no endereço compartilhado será combinada por um atendente assim que o pagamento for confirmado.'
       : ''
+    const linkAcompanhamento = `${STORE_BASE_URL}/consultar?order=${order.id}`
     // IMPORTANTE pra IA: o código Pix abaixo vai SOZINHO na segunda parte da
     // mensagem (depois do marcador de split) — nenhum outro texto (nem esse
-    // aviso de entrega, nem mais nada) pode vir grudado nele. id_pedido_interno
-    // NUNCA vai pro cliente — é só pra você (IA) guardar no histórico e usar
-    // depois em cancelar_pedido, se o cliente quiser mudar/cancelar isso.
-    return `Pedido criado com sucesso! Total: R$ ${totalFmt}.${entregaNote} id_pedido_interno=${order.id} (guarde esse id — use em cancelar_pedido se o cliente quiser mudar item ou cancelar depois; NUNCA mencione esse id pro cliente). Código Pix copia-e-cola pra mandar EXATO e SOZINHO pro cliente (sem nenhum texto antes/depois grudado):\n${paid.pix_copia_cola}`
+    // aviso de entrega, nem o link de acompanhamento, nem mais nada) pode vir
+    // grudado nele. id_pedido_interno bruto (a string solta, tipo
+    // "id_pedido_interno=abc123") NUNCA vai pro cliente como texto — é só
+    // pra você (IA) guardar no histórico e usar depois em cancelar_pedido.
+    // O link_acompanhamento abaixo JÁ TEM o id embutido na URL — pode e deve
+    // ser enviado ao cliente exatamente como veio, na primeira parte da
+    // mensagem (o aviso), pra ele acompanhar o pedido em tempo real.
+    return `Pedido criado com sucesso! Total: R$ ${totalFmt}.${entregaNote} Acompanhe seu pedido em tempo real: ${linkAcompanhamento} id_pedido_interno=${order.id} (guarde esse id — use em cancelar_pedido se o cliente quiser mudar item ou cancelar depois; NUNCA mencione esse id pro cliente, só o link_acompanhamento acima). Código Pix copia-e-cola pra mandar EXATO e SOZINHO pro cliente (sem nenhum texto antes/depois grudado):\n${paid.pix_copia_cola}`
   }
 
   const linkRes = await fetch(`${ECOMMERCE_API_URL}/api/orders/${order.id}/card-link`, { method: 'POST' })
@@ -568,9 +583,13 @@ async function criarPedidoEGerarCobranca(
   const entregaNote = opts.querEntregaOuColeta
     ? ' A entrega/coleta no endereço compartilhado será combinada por um atendente assim que o pagamento for confirmado.'
     : ''
-  // IMPORTANTE pra IA: o link abaixo vai SOZINHO na segunda parte da mensagem
-  // (depois do marcador de split) — nenhum outro texto grudado nele.
-  return `Pedido criado com sucesso! Total: R$ ${totalFmt}.${entregaNote} id_pedido_interno=${order.id} (guarde esse id — use em cancelar_pedido se o cliente quiser mudar item ou cancelar depois; NUNCA mencione esse id pro cliente). Link de pagamento por cartão pra mandar EXATO e SOZINHO pro cliente (sem nenhum texto antes/depois grudado):\n${paid.card_payment_link_url}`
+  const linkAcompanhamento = `${STORE_BASE_URL}/consultar?order=${order.id}`
+  // IMPORTANTE pra IA: o link de pagamento abaixo vai SOZINHO na segunda
+  // parte da mensagem (depois do marcador de split) — nenhum outro texto
+  // (nem o link de acompanhamento) grudado nele. O link_acompanhamento JÁ
+  // TEM o id embutido na URL — pode e deve ir ao cliente, na primeira parte
+  // da mensagem (o aviso). id_pedido_interno bruto nunca vira texto solto.
+  return `Pedido criado com sucesso! Total: R$ ${totalFmt}.${entregaNote} Acompanhe seu pedido em tempo real: ${linkAcompanhamento} id_pedido_interno=${order.id} (guarde esse id — use em cancelar_pedido se o cliente quiser mudar item ou cancelar depois; NUNCA mencione esse id pro cliente, só o link_acompanhamento acima). Link de pagamento por cartão pra mandar EXATO e SOZINHO pro cliente (sem nenhum texto antes/depois grudado):\n${paid.card_payment_link_url}`
 }
 
 /**
@@ -622,6 +641,20 @@ async function agendarHorario(ctx: ToolCtx, dataHora: string, motivo: string): P
   if (!res.ok) return `Não consegui agendar: ${await apiErrorMessage(res)}`
   const created = (await res.json()) as { id: string; scheduled_at: string; reason: string }
   return `Agendado com sucesso — ${formatAgendamento(created)} (guarde esse id — use em desmarcar_horario/editar_horario — NUNCA mencione esse id pro cliente).`
+}
+
+async function enviarLinkAcompanhamentoServico(tenantSlug: string, phone: string): Promise<string> {
+  const res = await fetch(`${ECOMMERCE_API_URL}/api/public/eletronicos/${tenantSlug}/consultar-otp`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ phone, send: true }),
+  })
+  if (!res.ok) return `Não consegui gerar o acesso de acompanhamento agora: ${await apiErrorMessage(res)}`
+  const body = (await res.json()) as { found: boolean; sent: boolean }
+  if (!body.found) return 'Ainda não encontrei nenhum atendimento pra esse telefone pra gerar o acompanhamento — confirme o agendamento primeiro.'
+  if (!body.sent) return 'O atendimento já existe, mas não consegui reenviar o código agora — tente de novo em instantes.'
+  const link = `${STORE_BASE_URL}/loja/consultar?tenant=${tenantSlug}`
+  return `Código de acesso enviado por WhatsApp pro cliente agora mesmo (válido por 1 hora). Informe ao cliente: acesse ${link} e digite o código que acabou de chegar pra acompanhar o serviço em tempo real.`
 }
 
 async function desmarcarHorario(tenantSlug: string, idAgendamento: string): Promise<string> {
