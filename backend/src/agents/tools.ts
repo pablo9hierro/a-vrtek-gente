@@ -240,6 +240,21 @@ export const tools: ToolDefinition[] = [
     },
   },
   {
+    name: 'buscar_atendimento_outro_whatsapp',
+    description:
+      'Use quando o cliente disser que o pedido/atendimento/serviço dele está cadastrado em OUTRO número de WhatsApp (diferente do número desta conversa) e informar esse outro número. Busca pedido/agendamento/serviço em andamento pra esse outro número, dentro da MESMA loja. Se achar: já migra o cadastro pro número desta conversa (é assim que o cliente vai acessar/logar depois) e dá continuidade ao atendimento encontrado — SEM pedir confirmação extra, sem OTP, confia no que o cliente disse. Se não achar nada: avise claramente e ofereça o catálogo (buscar_produtos/buscar_servicos) pra um pedido novo.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        outro_whatsapp: {
+          type: 'string',
+          description: 'O número de WhatsApp informado pelo cliente, do jeito que ele escreveu (com/sem +, espaços, 55, o 9 extra) — a ferramenta normaliza sozinha.',
+        },
+      },
+      required: ['outro_whatsapp'],
+    },
+  },
+  {
     name: 'enviar_link_acompanhamento_servico',
     description:
       'Envia ao cliente o código de acesso e o link pra ele acompanhar o andamento do serviço/ordem de reparo dele (telefone da própria conversa). Use SEMPRE assim que um agendamento (agendar_horario) for confirmado com sucesso — é o jeito do cliente ver o status da ordem de serviço depois, sem precisar voltar a falar contigo.',
@@ -287,6 +302,7 @@ export async function executeTool(name: string, input: Record<string, unknown>, 
     if (name === 'editar_horario')
       return await editarHorario(ctx.tenantSlug, String(input.id_agendamento ?? ''), String(input.nova_data_hora ?? ''))
     if (name === 'consultar_agendamentos') return await consultarAgendamentos(ctx.tenantSlug, ctx.phone)
+    if (name === 'buscar_atendimento_outro_whatsapp') return await buscarAtendimentoOutroWhatsapp(ctx, String(input.outro_whatsapp ?? ''))
     if (name === 'enviar_link_acompanhamento_servico') return await enviarLinkAcompanhamentoServico(ctx.tenantSlug, ctx.phone)
     return `Ferramenta desconhecida: ${name}`
   } catch (e) {
@@ -483,6 +499,50 @@ async function consultarPedido(tenantSlug: string, phone: string, outroTelefone?
     linhas.push(linha)
   }
   return linhas.join('\n')
+}
+
+/**
+ * Gera as variantes plausíveis de um número BR digitado livremente pelo
+ * cliente (com/sem +, espaços, 55, o 9 extra do celular) — usado só pra
+ * BUSCAR o cadastro antigo (comparação por dígitos no backend), nunca pra
+ * decidir qual formato salvar (isso é sempre ctx.phone, o número real da
+ * conversa atual).
+ */
+function normalizarWhatsappVariantes(raw: string): string[] {
+  let digits = raw.replace(/\D/g, '').replace(/^0+/, '')
+  if (!digits) return []
+  const comDdi = digits.startsWith('55') ? digits : `55${digits}`
+  const semDdi = digits.startsWith('55') ? digits.slice(2) : digits
+  // semDdi esperado: DDD(2) + numero(8 ou 9 dígitos, celular tem o 9 extra)
+  const variantes = new Set<string>([comDdi])
+  if (semDdi.length === 11) variantes.add(`55${semDdi.slice(0, 2)}${semDdi.slice(3)}`) // remove o 9
+  if (semDdi.length === 10) variantes.add(`55${semDdi.slice(0, 2)}9${semDdi.slice(2)}`) // adiciona o 9
+  return [...variantes]
+}
+
+async function buscarAtendimentoOutroWhatsapp(ctx: ToolCtx, outroWhatsapp: string): Promise<string> {
+  const candidatos = normalizarWhatsappVariantes(outroWhatsapp)
+  if (candidatos.length === 0) return 'Preciso do número de WhatsApp completo (com DDD) que o cliente informou pra buscar.'
+
+  const res = await fetch(`${ECOMMERCE_API_URL}/api/public/catalog/${ctx.tenantSlug}/migrate-customer-whatsapp`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ old_whatsapp_candidates: candidatos, new_whatsapp: ctx.phone }),
+  })
+  if (!res.ok) return `Não consegui buscar esse atendimento agora: ${await apiErrorMessage(res)}`
+  const body = (await res.json()) as { found: boolean }
+  if (!body.found) {
+    return `Não encontrei nenhum pedido/atendimento em andamento pro número ${outroWhatsapp} nessa loja. Avise o cliente e ofereça: (1) mandar o link do catálogo (use buscar_produtos e/ou buscar_servicos) pra ele fazer um pedido novo, ou (2) ajudar a escolher aqui mesmo no chat.`
+  }
+  // Migração feita — o cadastro antigo agora está sob ctx.phone (o número
+  // desta conversa). Reaproveita as consultas normais (que já buscam pelo
+  // telefone da conversa) pra montar a resposta com o atendimento real.
+  const pedidos = await consultarPedido(ctx.tenantSlug, ctx.phone)
+  const agendamentos = await consultarAgendamentos(ctx.tenantSlug, ctx.phone)
+  return (
+    `Encontrei e migrei o atendimento do número ${outroWhatsapp} pra este WhatsApp — a partir de agora é com este número que o cliente acessa/loga pra ver o pedido/serviço.\n\n` +
+    `Pedidos:\n${pedidos}\n\nAgendamentos:\n${agendamentos}`
+  )
 }
 
 function montarCarrinho(
