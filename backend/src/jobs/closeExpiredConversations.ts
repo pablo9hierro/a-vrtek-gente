@@ -71,7 +71,7 @@ export async function closeExpiredConversationsOnce(): Promise<number> {
   if (idsToClose.length === 0) return 0
 
   const { rowCount } = await pool.query(
-    `UPDATE assistant_ia.conversations SET status = 'fechada', closed_at = now() WHERE id = ANY($1::uuid[])`,
+    `UPDATE assistant_ia.conversations SET status = 'fechada', closed_at = now() WHERE id = ANY($1::text[])`,
     [idsToClose],
   )
   return rowCount ?? 0
